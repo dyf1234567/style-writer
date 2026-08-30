@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.log
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# Author packs, source corpora, and local indexes are intentionally external.
+authors/
+author-packs/
+corpus/
+corpora/
+indexes/
+*.db
+*.sqlite
+*.sqlite3
+*.index
+
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
