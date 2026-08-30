@@ -14,6 +14,14 @@ python scripts/style_engine.py status --author jiangnan
 python scripts/style_engine.py build --author jiangnan --provider ollama --model bge-m3
 ```
 
+When the pack, corpus, or index use non-default locations, pass every root explicitly for the first build:
+
+```powershell
+python scripts/style_engine.py build --author jiangnan --authors-root <author-pack-root> --corpus-root <corpus-root> --index-root <index-root> --provider ollama --model bge-m3 --endpoint http://127.0.0.1:11434
+```
+
+The generated SQLite index is machine-local and rebuildable. Keep it outside the Skill and out of Git.
+
 Use `--provider none` for FTS5-only portability. Exact duplicate files and duplicate chunks are removed. Files matching the pack's exclusions are skipped unless `--include-lore` is explicitly supplied.
 
 After changing only family patterns or lore exclusions, refresh metadata without

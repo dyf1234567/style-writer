@@ -1,6 +1,6 @@
 ---
 name: style-writer
-description: Build, query, and apply portable author-inspired prose style packs for Chinese writing, with optional local hybrid retrieval, family routing, and source-overlap auditing. Use for style analysis, reusable style packs, style-guided drafting or revision; use novel-writer as the primary workflow when long-form story continuity is the main task.
+description: Build, query, and apply portable author-inspired prose style packs for Chinese writing, with optional local hybrid retrieval, family routing, and source-overlap auditing. Use for style analysis, reusable style packs, style-guided drafting or revision; use serial-fiction-studio as the primary workflow when long-form story continuity is the main task.
 ---
 
 # Style Writer
@@ -12,7 +12,7 @@ Use author packs as reusable writing references, not as claims of authorship or 
 - For ordinary style-guided writing or revision, resolve the author pack and run `scripts/style_engine.py prepare` before drafting.
 - For building or refreshing a corpus index, read [references/workflows.md](references/workflows.md).
 - For creating or moving author packs, read [references/pack-contract.md](references/pack-contract.md).
-- When continuing a long novel, let `novel-writer` own continuity and use this Skill only to provide compact style context.
+- When continuing a long novel, let `serial-fiction-studio` own continuity and use this Skill only to provide compact style context.
 
 ## Invariants
 
