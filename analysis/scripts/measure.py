@@ -39,6 +39,24 @@ F2b' 目录过滤对最后一个候选曾用 len(text) 当「下一标记」间�
   - 输出只有「词 → 每千字频次」，词本身是通用词汇，可安全进提示词。
 分词缺失的近似：词表均为 1-3 字词，直接 str.count 计数，口径粗但稳定。
 
+口径修正（v5，2026-09-09，style-writer 公开仓库实测）
+------------------------------------------------------
+F4 _decode 的编码顺序必须先试 utf-8-sig。
+   旧顺序先试 utf-8，BOM 作为一个字符留在文本开头；当文件首行恰是章节标题时
+   ^[ \t\u3000]* 匹配不到它，卷首单元整块丢失 —— 正是 F1 要防的失效模式经编码路径复活
+   （实测 200 章样本：201 单元变 200，1382 字落在所有单元之外，unit_kind 仍报 chapter）。
+F5 对白标点集合必须覆盖实际排版，且块长上限不能截断长独白。
+   只认 “” 会让「」排版的书 dialogue_char_ratio 静默为 0（实测 0.511 → 0.000）；
+   epub 用 &ldquo; 实体时同样归零（0.714 → 0.000）；单段对白 > 300 字整段不计。
+   0 在下游 import-pack 里等同「模板未填」，整个字段会从 pack 中蒸发且无警告，
+   所以除补齐匹配外，还必须在 warnings 里显式报告「一个对白块都没匹配到」。
+F6 epub 按 spine 取文件时，解析不到的 href 必须计数上报。
+   旧实现 `files = [f for f in files if f in names]` 静默丢页（实测 spine 两项
+   只命中一项时，用 678/1395 字照常算出全套指标）；含 %20 的 href 未解码。
+
+F4/F5/F6 类问题统一进 metrics["warnings"]，控制台也会打印；
+warnings 非空时不要直接把数字抄进特征卡。
+
 用法
 ----
     python measure.py <file.txt|file.epub> [-o metrics.json] [--min-gap 300]
@@ -49,20 +67,26 @@ F2b' 目录过滤对最后一个候选曾用 len(text) 当「下一标记」间�
 """
 
 import argparse
+import html
 import json
 import re
 import statistics
 import sys
 import zipfile
+import urllib.parse
 from pathlib import Path
 
 CN = r"\u4e00-\u9fa5"
 SENT_END = re.compile(r"[。！？!?…]+[”』」]*")
 
 # F3：对白与叙述者评论分开计数
-DIA_FULL = re.compile(r"“([^”]{1,300}?)”")
-DIA_HALF = re.compile(r'"([^"]{1,300}?)"')
-NARR_COMMENT = re.compile(r"『([^』]{1,300}?)』")
+# F5：对白标点必须覆盖实际排版（「」排版的书此前整本算作 0 对白），
+#     块长上限 300 会整段丢弃长独白，抬到 3000 仅作失控保护。
+DIA_FULL = re.compile(r"“([^”]{1,3000}?)”")
+DIA_HALF = re.compile(r'"([^"]{1,3000}?)"')
+DIA_CORNER = re.compile(r"「([^」]{1,3000}?)」")
+DIA_PATTERNS = (DIA_FULL, DIA_HALF, DIA_CORNER)
+NARR_COMMENT = re.compile(r"『([^』]{1,3000}?)』")
 
 # F1：分章正则，含卷首尾单元
 CHAPTER = re.compile(
@@ -111,7 +135,9 @@ SIMILE_SHORT = ["像", "如", "似", "般"]
 # ---------------------------------------------------------------- 载入
 
 def _decode(raw: bytes):
-    for enc in ("utf-8", "utf-8-sig", "gb18030", "gbk", "big5"):
+    # F4：utf-8-sig 必须排在最前。旧顺序先试 utf-8，BOM 会作为一个字符留在
+    # 文本开头，首行恰是章节标题时该标记就匹配不到了 —— 卷首单元整块丢失。
+    for enc in ("utf-8-sig", "gb18030", "gbk", "big5"):
         try:
             return raw.decode(enc)
         except UnicodeDecodeError:
@@ -119,8 +145,15 @@ def _decode(raw: bytes):
     return raw.decode("utf-8", errors="ignore")
 
 
-def load_epub(path: Path) -> str:
-    """按 spine 顺序拼正文。解析失败时退化为「按文件名顺序读所有 xhtml」."""
+def load_epub(path: Path) -> tuple[str, dict]:
+    """按 spine 顺序拼正文，返回 (文本, 来源信息)。
+
+    F6：解析不到的 href 记进 missing_hrefs，不再静默丢页；spine 整体读不出时
+    退化为「按文件名顺序读所有 xhtml」并标记 parser=fallback（该路径会把封面页、
+    目录页一起算进正文）。
+    """
+    info = {"kind": "epub", "file": path.name, "parser": "spine",
+            "spine_items": 0, "files_read": 0, "missing_hrefs": []}
     with zipfile.ZipFile(path) as z:
         names = z.namelist()
         try:
@@ -133,28 +166,46 @@ def load_epub(path: Path) -> str:
                 i = re.search(r'id="([^"]+)"', tag)
                 h = re.search(r'href="([^"]+)"', tag)
                 if i and h:
-                    manifest[i.group(1)] = h.group(1)
+                    manifest[i.group(1)] = urllib.parse.unquote(h.group(1))
             spine_ids = re.findall(r'<itemref[^>]+idref="([^"]+)"', opf)
+            info["spine_items"] = len(spine_ids)
+            info["missing_hrefs"] = [f"idref={i} 不在 manifest" for i in spine_ids if i not in manifest]
             order = [manifest[i] for i in spine_ids if i in manifest]
             files = [f"{base}/{h}" if base != "." else h for h in order]
+            info["missing_hrefs"] += [f for f in files if f not in names]
             files = [f for f in files if f in names]
-        except Exception:
+        except Exception as exc:
+            info["parser"] = f"fallback(按文件名顺序读所有 xhtml，含封面/目录页) {type(exc).__name__}"
             files = sorted(
                 n for n in names if n.lower().endswith((".xhtml", ".html", ".htm"))
             )
         parts = []
         for f in files:
-            html = _decode(z.read(f))
-            html = re.sub(r"(?is)<(script|style).*?</\1>", " ", html)
-            text = HTML_TAG.sub("\n", html)
-            parts.append(text)
-    return "\n".join(parts)
+            doc = _decode(z.read(f))
+            doc = re.sub(r"(?is)<(script|style).*?</\1>", " ", doc)
+            # F5：先剥标签再还原实体，避免 &lt;p&gt; 这类转义文本被当成标签；
+            # 不还原的话 &ldquo; 排版的书对白会整本算成 0。
+            parts.append(html.unescape(HTML_TAG.sub("\n", doc)))
+        info["files_read"] = len(files)
+    return "\n".join(parts), info
+
+
+def load_document(path: Path) -> tuple[str, dict]:
+    """载入文件，返回 (文本, 来源信息)。来源信息会并进 metrics["source"]。"""
+    if path.suffix.lower() == ".epub":
+        return load_epub(path)
+    raw = path.read_bytes()
+    info = {"kind": "text", "file": path.name, "bytes": len(raw),
+            "parser": "plain", "spine_items": 0, "files_read": 1, "missing_hrefs": []}
+    if raw.startswith(b"\xef\xbb\xbf"):
+        info["bom"] = "stripped-by-utf-8-sig"
+    # 换行统一：Windows 转出来的 GBK/UTF-8 语料普遍是 CRLF，留着 \r 会让
+    # 分隔行判定（SEPARATOR 的 $）和标题行匹配出现口径差。
+    return _decode(raw).replace("\r\n", "\n").replace("\r", "\n"), info
 
 
 def load_text(path: Path) -> str:
-    if path.suffix.lower() == ".epub":
-        return load_epub(path)
-    return _decode(path.read_bytes())
+    return load_document(path)[0]
 
 
 # ---------------------------------------------------------------- 切分
@@ -310,13 +361,19 @@ def _stats(values):
     }
 
 
-def measure(text: str, min_gap: int = 300) -> dict:
+def measure(text: str, min_gap: int = 300, source: dict | None = None) -> dict:
     units, unit_kind = split_chapters(text, min_gap)
     all_text = text
 
     total_cn = cn_len(all_text)
     if total_cn == 0:
-        raise SystemExit("未提取到中文字符，检查文件编码或是否为扫描版 PDF。")
+        src = source or {}
+        raise SystemExit(
+            "未提取到中文字符。来源："
+            + json.dumps({k: src.get(k) for k in ("kind", "file", "parser", "spine_items",
+                                                  "files_read", "missing_hrefs")}, ensure_ascii=False)
+            + "（epub 请核对 spine 是否解析成功；扫描版 PDF 不在支持范围内）"
+        )
 
     # 章节 / 块
     unit_words = [cn_len(u) for u in units]
@@ -338,11 +395,39 @@ def measure(text: str, min_gap: int = 300) -> dict:
         sents.extend(split_sentences(u))
     sent_words = [cn_len(s) for s in sents]
 
-    # F3：对白与叙述者评论分开计数
-    dia_blocks = DIA_FULL.findall(all_text) + DIA_HALF.findall(all_text)
+    # F3/F5：对白与叙述者评论分开计数，对白覆盖 “” / "" / 「」 三种排版
+    dia_blocks = [m for pat in DIA_PATTERNS for m in pat.findall(all_text)]
     quoted_chars = sum(cn_len(m) for m in dia_blocks)
     narr_blocks = NARR_COMMENT.findall(all_text)
     narr_chars = sum(cn_len(m) for m in narr_blocks)
+
+    warnings = []
+    src = source or {}
+    if src.get("missing_hrefs"):
+        warnings.append(
+            f"epub 有 {len(src['missing_hrefs'])} 个 spine 条目没解析出来，"
+            f"这部分内容未参与统计：{src['missing_hrefs'][:5]}"
+        )
+    if str(src.get("parser", "")).startswith("fallback"):
+        warnings.append(
+            f"epub spine 解析失败，已退化为按文件名顺序读全部 xhtml（封面页、目录页会被当正文）：{src['parser']}"
+        )
+    if not dia_blocks and total_cn >= 1000:
+        warnings.append(
+            "整篇没匹配到任何对白块（已试 “” / \"\" / 「」）。"
+            "若这本书确实用别的引号排版，dialogue.char_ratio=0 是测量失败而不是风格特征；"
+            "0 值会被 import-pack 当作「模板未填」丢弃，进卡前务必人工核对。"
+        )
+    if DIA_CORNER.findall(all_text) and narr_blocks:
+        warnings.append(
+            "「」与『』同时出现：在「」排版体系里『』通常是嵌套对白，"
+            "而本脚本按 F3 把 『』 记作叙述者评论，narrator_comment.char_ratio 可能被高估。"
+        )
+    if unit_kind.startswith("block"):
+        warnings.append(
+            "未识别到章节标题，已按空行切块：章级指标（章长、篇幅曲线）口径已变，"
+            "不能当作「章」抄进 style-card 的 serial_rhythm.words_per_chapter。"
+        )
 
     # 标点密度（每千字）
     per1k = lambda c: round(all_text.count(c) / total_cn * 1000, 2)
@@ -383,6 +468,8 @@ def measure(text: str, min_gap: int = 300) -> dict:
         },
         "punct_per_1k": punct,
         "lexeme": lex,
+        "source": src,
+        "warnings": warnings,
         "_sampled_sentences_from": len(sample_units),
     }
 
@@ -429,6 +516,14 @@ def summarize(m: dict) -> str:
     sim = lx.get("simile", {})
     a("明喻标记密度   : 每千字 %s | %s" % (
         sim.get("total_per_1k"), sim.get("markers", {})))
+    warns = m.get("warnings") or []
+    a("")
+    if warns:
+        a(f"⚠ 警告 {len(warns)} 条 —— 数字抄进特征卡之前先处理：")
+        for w in warns:
+            a(f"  - {w}")
+    else:
+        a("警告          : 无")
     return "\n".join(L)
 
 
@@ -448,8 +543,8 @@ def main():
     if not path.exists():
         raise SystemExit(f"文件不存在: {path}")
 
-    text = load_text(path)
-    m = measure(text, args.min_gap)
+    text, source = load_document(path)
+    m = measure(text, args.min_gap, source)
     print(summarize(m))
 
     out = Path(args.out) if args.out else path.with_suffix(".metrics.json")
