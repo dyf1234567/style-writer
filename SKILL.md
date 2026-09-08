@@ -9,7 +9,7 @@ Use author packs as reusable writing references, not as claims of authorship or 
 
 ## Route the task
 
-- To turn a reference work into a style profile (author analysis), read [analysis/README.md](analysis/README.md): measure the corpus, fill the 9-dimension report, converge to a `style-card.yaml`, then `import-pack` it into a runtime pack.
+- To turn a reference work into a style profile (author analysis), read [analysis/README.md](analysis/README.md): measure the corpus, fill the report (emotion writing and reward rhythm included since card v2), converge to a `style-card.yaml`, then `import-pack` it into a runtime pack.
 - For ordinary style-guided writing or revision, resolve the author pack and run `scripts/style_engine.py prepare` before drafting.
 - For building or refreshing a corpus index, read [references/workflows.md](references/workflows.md).
 - For creating or moving author packs, read [references/pack-contract.md](references/pack-contract.md).

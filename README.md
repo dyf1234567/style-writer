@@ -6,7 +6,7 @@ The workflow is designed for high-level inspiration rather than exact impersonat
 
 The repository spans both sides of the style pipeline:
 
-- `analysis/` — style **recognition**: read a reference work and converge it into an abstract `style-card.yaml` (9-dimension report + `measure.py` quantification; formerly the standalone novel-style-kit project). Method only — never plot, names, or prose.
+- `analysis/` — style **recognition**: read a reference work and converge it into an abstract `style-card.yaml` (11-section report incl. emotion writing & reward rhythm + `measure.py` quantification with v4 lexeme stats; formerly the standalone novel-style-kit project). Method only — never plot, names, or prose.
 - `scripts/style_engine.py` — style **execution**: index a corpus, retrieve per-scene writing context, audit drafts for source overlap.
 
 `import-pack` is the bridge between them: a filled style card becomes a runtime `pack.json`. See [From card to pack](#from-card-to-pack).
@@ -60,7 +60,7 @@ python analysis/scripts/measure.py <work.txt|work.epub> -o metrics.json
 python scripts/style_engine.py import-pack --author example-style --card style-card.yaml
 ```
 
-Mapping: abstract `voice/timeline/scene/syntax/dialogue_style/imagery` fields and quantified statistics become `traits`; plotline weights and serial-rhythm numbers become `scene_controls`; card `imagery.taboo` entries extend `negative_constraints`. Unfilled template defaults (`0`, `""`, `[]`) are skipped; an all-empty card is rejected.
+Mapping: abstract `voice/timeline/scene/syntax/dialogue_style/imagery` fields and quantified statistics become `traits` (card v2 adds `emotion_writing` methods and lexeme-density numbers here too); plotline weights, serial-rhythm numbers and `reward_rhythm` intervals become `scene_controls`; card `imagery.taboo` entries extend `negative_constraints`. Unfilled template defaults (`0`, `""`, `[]`) are skipped; an all-empty card is rejected.
 
 The bridge enforces red lines programmatically:
 
@@ -76,4 +76,4 @@ After importing, `status`, `build`, `prepare`, and `audit-overlap` work on the n
 
 Only index material you are authorized to use. Keep copyrighted corpora and generated databases outside public repositories. An overlap warning is a manual review signal, not a legal conclusion.
 
-No general open-source license is currently granted by this repository merely because it is publicly visible.
+The code, scripts, templates, and documentation in this repository are released under the [MIT License](LICENSE). That license covers the Software only — it does **not** grant any right to a literary corpus, an author style pack (`pack.json` / `style-card.yaml`), its retrieval database, or prose generated with them; those remain with their respective owners and need separate authorization to distribute.

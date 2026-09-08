@@ -90,6 +90,7 @@ syntax:
     dash: 1.2
   register: "口语化"
   sentence_rhythm_note: "长句铺陈短句收束"
+  lexical_fingerprint: ["忽然", "顿时"]
 
 dialogue_style:
   subtext_density: "高"
@@ -101,6 +102,24 @@ imagery:
   metaphor_type: "明喻为主"
   recurrence_interval: "每卷翻转一次"
   taboo: []
+  simile_markers_per_1k: 5.3
+
+emotion_writing:
+  carrier: "身体反应与动作细节"
+  escalation_pattern: "层层加压后单次释放"
+  restraint_level: "克制"
+  peak_label: "峰值处切短段高速剪辑"
+  emotion_words_per_1k: 8.7
+  body_reaction_ratio: "约四成（置信度中）"
+
+reward_rhythm:
+  payoff_unit: "翻案与身份揭示"
+  payoff_interval: 6
+  buildup_release_ratio: "4:1"
+  installment_style: "分层递进结清"
+  promise_drift: "平均滞后 12 章"
+  curve_within_arc: "双峰"
+  chapter_micro_payoff: "每章必带信息增量"
 """
 
 
@@ -141,6 +160,14 @@ class ImportPackTests(unittest.TestCase):
         self.assertIn("情节线 A：主线·推进目标·视角 人物甲·权重 0.6", controls_text)
         self.assertIn("高潮弧跨度：8 章", controls_text)
         self.assertIn("单场景字数区间：800-1800", controls_text)
+        # v2 card dimensions
+        self.assertIn("情绪载体：身体反应与动作细节", traits_text)
+        self.assertIn("情绪词密度(每千字)：8.7", traits_text)
+        self.assertIn("明喻标记密度(每千字)：5.3", traits_text)
+        self.assertIn("词汇指纹：忽然、顿时", traits_text)
+        self.assertIn("压抑/释放比：4:1", traits_text)
+        self.assertIn("兑现单元：翻案与身份揭示", controls_text)
+        self.assertIn("小回报间隔：每 6 章", controls_text)
         self.assertEqual(pack["negative_constraints"][0], "禁止复刻原作语句、人名、地名与具体情节")
         self.assertIn("第 1-120 章", pack["positioning"])
 

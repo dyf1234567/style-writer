@@ -10,6 +10,9 @@
 # 数据来源约定：标 [M] 的字段由 scripts/measure.py 统计得到；
 #               标 [R] 的需要人工阅读抽样后判断；
 #               标 [I] 的为推断项，须注明置信度。
+#
+# v2（2026-09-08）：新增第 8 节 emotion_writing 与第 9 节 reward_rhythm；
+#   measure.py v4 的词层输出（lexeme 段）为两节及 7 对白意象提供 [M] 参考值。
 
 meta:
   target_work: ""            # 目标作品名，仅内部标注，禁止进入生成提示词
@@ -102,6 +105,8 @@ syntax:
     dash: 0.0
   register: ""               # [R] 雅 / 俗 / 半文半白 / 口语化 / 行话密度
   sentence_rhythm_note: ""   # [R] 长句铺陈后是否惯用短句收束
+  lexical_fingerprint: []    # [M·v2] 口癖/高频功能词 top-N，只填通用词（语气词、副词、动词），
+                             #        禁止人名、招式名等专名 —— 参考 measure lexeme.top_lexemes
 
 # ---------------------------------------------------------------- 7 对白与意象
 dialogue_style:
@@ -114,6 +119,27 @@ imagery:
   metaphor_type: ""          # [R] 明喻 / 暗喻 / 借代 / 通感的偏好
   recurrence_interval: ""    # [R] 核心意象的复现间隔与变奏方式
   taboo: []                  # [R] 该作者明显回避的表达
+  simile_markers_per_1k: 0.0 # [M·v2] 明喻标记词密度（像/如/仿佛/似的/宛如…每千字）
+                             #        —— 参考 measure lexeme.simile_per_1k
+
+# ---------------------------------------------------------------- 8 情感书写 ★v2 新增
+emotion_writing:
+  carrier: ""                # [R] 情绪主要靠什么承载：身体反应 / 动作细节 / 景物投射 / 内心独白 / 对白潜台词
+  escalation_pattern: ""     # [R] 情绪升级路径：层层加压 / 瞬间爆发后冷却 / 反差切入
+  restraint_level: ""        # [R] 克制 / 中档 / 浓烈（抒情浓度，可用标点与短句比佐证）
+  peak_label: ""             # [R] 卷内情绪峰值段落的写法特征（不写具体内容，只写手法）
+  emotion_words_per_1k: 0.0  # [M] 显性情绪词密度（每千字）—— 参考 measure lexeme.emotion_per_1k
+  body_reaction_ratio: ""    # [I] 情绪句中含身体反应词（手/心跳/喉咙等）的占比估计，注明置信度
+
+# ---------------------------------------------------------------- 9 回报节律 ★v2 新增
+reward_rhythm:
+  payoff_unit: ""            # [R] 爽点/泪点的最小兑现单元：打脸 / 越级取胜 / 身份揭示 / 重逢 / 翻案
+  payoff_interval: 0         # [R] 平均每隔多少章兑现一次小回报
+  buildup_release_ratio: ""  # [R] 压抑段与释放段的篇幅比（如 4:1 —— 压得越久放得越响）
+  installment_style: ""      # [R] 回报的分期方式：一次性结清 / 分层递进结清 / 故意拖欠至卷末
+  promise_drift: ""          # [R] 立 flag 到兑现的平均章数跨度；长期拖欠则注明读者反馈模式
+  curve_within_arc: ""       # [R] 大高潮弧内部回报分布：前低后高 / 双峰 / 末段集中
+  chapter_micro_payoff: ""   # [R] 章内是否必带小回报（信息增量 / 小胜利 / 新钩子），频率多少
 
 # ---------------------------------------------------------------- 红线自检
 # 填完后逐项打勾，任何一项不通过就回改：

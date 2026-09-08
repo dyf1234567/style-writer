@@ -30,6 +30,15 @@ F2b' 目录过滤对最后一个候选曾用 len(text) 当「下一标记」间�
      < min_gap 的短尾章（尾声/后记/终章）会被误判为目录行吞并 → 末单元丢失。
      修复：末候选改为「紧跟前一候选（同属目录块）才滤除」。
 
+词层指标（v4，2026-09-08，style-card v2 的 emotion_writing / reward_rhythm 配套）
+------------------------------------------------------
+新增 lexeme 段：词汇指纹 top-N、显性情绪词密度、明喻标记词密度。
+为守住「不输出任何原文」红线，三项全部基于**封闭词表**计数：
+  - 口癖表只含语气词/副词/常见动词等功能词，天然排除人名招式名等专名；
+  - 情绪词表与比喻标记表同为通用词，任何命中都不构成受版权保护的表达；
+  - 输出只有「词 → 每千字频次」，词本身是通用词汇，可安全进提示词。
+分词缺失的近似：词表均为 1-3 字词，直接 str.count 计数，口径粗但稳定。
+
 用法
 ----
     python measure.py <file.txt|file.epub> [-o metrics.json] [--min-gap 300]
@@ -77,6 +86,26 @@ PUNCT_WATCH = {
     "：": "colon",
     "、": "enum_comma",
 }
+
+# v4 词层指标：三个封闭词表（通用词，命中不构成受版权保护的表达）。
+# 口癖表刻意只用功能词——高频实词易撞专名，违背红线。
+LEXEME_WATCH = [
+    "忽然", "顿时", "立刻", "终于", "干脆", "反正", "难道", "索性",
+    "居然", "竟然", "毕竟", "简直", "或许", "大概", "似乎", "仿佛",
+    "罢了", "而已", "来着", "得了",
+]
+EMOTION_WATCH = [
+    "疼", "痛", "暖", "凉", "颤", "抖", "僵", "揪", "堵", "慌",
+    "委屈", "心酸", "发麻", "喉咙", "鼻子一酸", "想哭", "眼眶",
+    "窒息", "烦躁", "踏实", "安心", "惶恐", "窃喜", "失落",
+    "热", "冷", "苦", "甜", "辣",
+]
+SIMILE_WATCH = ["像", "如", "仿佛", "似", "宛如", "犹如", "般", "一样", "一般"]
+
+# 「像/如/似/般」等单字词误报率高（好像/比如/似乎/一般 均含之），
+# 组合词优先：先数长词并从文本中临时摘除，再数单字，降低重复计数。
+SIMILE_LONG = ["仿佛", "宛如", "犹如", "好像", "似乎", "一样", "一般", "似的"]
+SIMILE_SHORT = ["像", "如", "似", "般"]
 
 
 # ---------------------------------------------------------------- 载入
@@ -206,6 +235,60 @@ def cn_len(s: str) -> int:
     return len(re.findall(rf"[{CN}]", s))
 
 
+# ---------------------------------------------------------------- 词层（v4）
+
+def _count_groups(text: str, long_words, short_words) -> dict:
+    """长词优先计数并从工作副本摘除，再数短词，避免「好像」重复计入「像」。
+    摘除只影响本函数内部副本，不改原文。"""
+    work = text
+    counts = {}
+    for w in long_words:
+        c = work.count(w)
+        if c:
+            counts[w] = c
+            work = work.replace(w, "\x00")
+    for w in short_words:
+        c = work.count(w)
+        if c:
+            counts[w] = c
+    return counts
+
+
+def lexeme_stats(text: str, total_cn: int, top_n: int = 15) -> dict:
+    """词汇指纹 / 情绪词密度 / 明喻标记密度 —— 全部封闭词表，零原文输出。"""
+    per1k = lambda c: round(c / max(1, total_cn) * 1000, 3)
+
+    lex_counts = {w: text.count(w) for w in LEXEME_WATCH}
+    top_lex = sorted((w, c) for w, c in lex_counts.items() if c)
+    top_lex = [
+        {"word": w, "per_1k": per1k(c)}
+        for w, c in sorted(top_lex, key=lambda kv: -kv[1])[:top_n]
+    ]
+
+    emo_counts = _count_groups(text, [w for w in EMOTION_WATCH if len(w) >= 2],
+                               [w for w in EMOTION_WATCH if len(w) == 1])
+    emotion_total = sum(emo_counts.values())
+
+    sim_counts = _count_groups(text, SIMILE_LONG, SIMILE_SHORT)
+    simile_total = sum(sim_counts.values())
+
+    return {
+        "top_lexemes": top_lex,
+        "emotion": {
+            "total_per_1k": per1k(emotion_total),
+            "top": [
+                {"word": w, "per_1k": per1k(c)}
+                for w, c in sorted(emo_counts.items(), key=lambda kv: -kv[1])[:10]
+            ],
+        },
+        "simile": {
+            "total_per_1k": per1k(simile_total),
+            "markers": dict(sorted(sim_counts.items(), key=lambda kv: -kv[1])),
+        },
+        "note": "封闭词表计数：只输出通用词与频次，不含任何原文片段",
+    }
+
+
 # ---------------------------------------------------------------- 统计
 
 def _stats(values):
@@ -265,6 +348,9 @@ def measure(text: str, min_gap: int = 300) -> dict:
     per1k = lambda c: round(all_text.count(c) / total_cn * 1000, 2)
     punct = {name: per1k(ch) for ch, name in PUNCT_WATCH.items()}
 
+    # v4 词层指标
+    lex = lexeme_stats(all_text, total_cn)
+
     return {
         "unit_kind": unit_kind,
         "total_chars_cn": total_cn,
@@ -296,6 +382,7 @@ def measure(text: str, min_gap: int = 300) -> dict:
             "note": "『』块单列，不计入对话；用于 voice.narrator_comment_ratio",
         },
         "punct_per_1k": punct,
+        "lexeme": lex,
         "_sampled_sentences_from": len(sample_units),
     }
 
@@ -330,6 +417,18 @@ def summarize(m: dict) -> str:
     n = m["narrator_comment"]
     a(f"叙述者评论(『』): {n['blocks']} 块 | 字符占比 {n['char_ratio']}")
     a(f"标点密度(每千字): {m['punct_per_1k']}")
+    lx = m.get("lexeme", {})
+
+    def _fmt(items, n):
+        return ", ".join("%s %s" % (t["word"], t["per_1k"]) for t in items[:n])
+
+    a("口癖top        : " + _fmt(lx.get("top_lexemes", []), 8))
+    emo = lx.get("emotion", {})
+    a("情绪词密度     : 每千字 %s | top: %s" % (
+        emo.get("total_per_1k"), _fmt(emo.get("top", []), 6)))
+    sim = lx.get("simile", {})
+    a("明喻标记密度   : 每千字 %s | %s" % (
+        sim.get("total_per_1k"), sim.get("markers", {})))
     return "\n".join(L)
 
 

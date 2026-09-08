@@ -145,6 +145,52 @@ class StyleEngineTests(unittest.TestCase):
         self.assertTrue(result["requires_manual_review"])
         self.assertTrue(result["warnings"])
 
+    def test_overlap_detects_copy_beyond_snippet_prefix(self) -> None:
+        """v2 修复回归：抄袭落在长 chunk 第 360 字之后也必须命中。
+        旧实现拿 chunk 前 360 字做比对，本用例的抄写句在第 400 字后，会漏检。"""
+        corpus_dir = self.root / "corpus2"
+        corpus_dir.mkdir()
+        filler = "".join(
+            f"墙上的挂钟指针挪到第{i}格，落满灰的桌面没有一件东西在动。"
+            for i in range(1, 16)
+        )  # ~390 字，把抄写句推到 360 字之后
+        copied = (
+            "老兵把军牌埋进雪里，转身朝山口走去，风把他的帽檐掀起来，"
+            "他没有回头，雪地上只剩下一串越来越浅的脚印和半截烧焦的旗杆。"
+        )
+        (corpus_dir / "现代长篇.txt").write_text(filler + copied, encoding="utf-8")
+        pack_dir = self.authors / "demo2"
+        pack_dir.mkdir(parents=True)
+        pack = {
+            "schema_version": 1, "slug": "demo2", "display_name": "demo2-inspired",
+            "positioning": "high-level only", "corpus": {"env": "DEMO2_STYLE_CORPUS"},
+            "default_family": "modern", "unmatched_family": "other",
+            "families": [{"id": "modern", "label": "现代", "patterns": ["现代"]}],
+            "exclude_patterns": [], "traits": ["t"], "scene_controls": [],
+            "negative_constraints": [],
+        }
+        (pack_dir / "pack.json").write_text(json.dumps(pack, ensure_ascii=False), encoding="utf-8")
+        os.environ["DEMO2_STYLE_CORPUS"] = str(corpus_dir)
+        try:
+            built = style_engine.build_index(
+                "demo2", self.authors, self.indexes, provider="hash", batch_size=2
+            )
+            self.assertGreaterEqual(built["passages"], 1)
+            # 抄写句位于单 chunk 第 ~390 字处（> 360 字 snippet 前缀），
+            # 旧实现必然漏检；修复后应命中。
+            draft = self.root / "draft2.txt"
+            draft.write_text("那天下着小雨。" * 5 + copied, encoding="utf-8")
+            result = style_engine.audit_overlap(
+                "demo2", draft, self.authors, self.indexes, family="modern",
+                exact_run_threshold=24,
+            )
+            self.assertTrue(
+                result["requires_manual_review"],
+                f"360 字盲区未修复: {result['warnings']}",
+            )
+        finally:
+            os.environ.pop("DEMO2_STYLE_CORPUS", None)
+
 
 if __name__ == "__main__":
     unittest.main()

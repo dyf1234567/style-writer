@@ -428,6 +428,7 @@ def query_index(
     limit: int = 5,
     source_lore: bool = False,
     endpoint: str | None = None,
+    with_full_text: bool = False,
 ) -> dict:
     resolve_pack(author, authors_root)
     index_path = resolve_index(author, index_root)
@@ -493,14 +494,19 @@ def query_index(
     for pid in ids:
         row = rows[pid]
         text = str(row["text"])
-        hits.append({
+        hit = {
             "id": pid,
             "relpath": row["relpath"],
             "family": row["family"],
             "score": round(scores[pid], 8),
             "evidence": sorted(evidence.get(pid, set())),
             "snippet": text[:360] + ("…" if len(text) > 360 else ""),
-        })
+        }
+        if with_full_text:
+            # 仅供 audit-overlap 内部使用（全 chunk 比对，消除 snippet 截断盲区）；
+            # 默认关闭，prepare/query 的对外输出依旧只有 360 字摘录。
+            hit["full_text"] = text
+        hits.append(hit)
     conn.close()
     mode = "hybrid" if lexical and vector_used else ("fts5" if lexical else "vector")
     return {
@@ -628,9 +634,15 @@ def audit_overlap(
     probes = list(iter_chunks(text, target=260, maximum=420, minimum=40))
     warnings = []
     for probe_no, probe in enumerate(probes, 1):
-        result = query_index(author, probe, authors_root, index_root, family, 5, False)
+        result = query_index(
+            author, probe, authors_root, index_root, family, 5, False,
+            with_full_text=True,
+        )
         for hit in result.get("hits", []):
-            source = str(hit.get("snippet", "")).rstrip("…")
+            # v2 修复：旧实现用 hit["snippet"]（chunk 前 360 字）比对，
+            # 抄写落在长 chunk 第 360 字之后即整段漏检。现取完整 chunk 文本；
+            # full_text 由 with_full_text 显式开启，不进入任何对外输出。
+            source = str(hit.get("full_text") or hit.get("snippet", "")).rstrip("…")
             matcher = SequenceMatcher(None, probe, source, autojunk=False)
             ratio = matcher.ratio()
             longest = matcher.find_longest_match(0, len(probe), 0, len(source)).size
@@ -674,6 +686,18 @@ CARD_TRAIT_LABELS = {
     "dialogue_style.exposition_in_dialogue": "对白承载背景",
     "imagery.metaphor_type": "比喻偏好",
     "imagery.recurrence_interval": "意象复现节律",
+    # v2 card: emotion writing & reward rhythm (string methods only;
+    # numeric stats ride the dedicated handlers below)
+    "emotion_writing.carrier": "情绪载体",
+    "emotion_writing.escalation_pattern": "情绪升级路径",
+    "emotion_writing.restraint_level": "抒情克制度",
+    "emotion_writing.peak_label": "情绪峰值手法",
+    "emotion_writing.body_reaction_ratio": "身体反应占比(推断)",
+    "reward_rhythm.buildup_release_ratio": "压抑/释放比",
+    "reward_rhythm.installment_style": "回报分期方式",
+    "reward_rhythm.promise_drift": "立flag到兑现跨度",
+    "reward_rhythm.curve_within_arc": "弧内回报分布",
+    "reward_rhythm.chapter_micro_payoff": "章内小回报",
 }
 
 CARD_CONTROL_LABELS = {
@@ -684,6 +708,7 @@ CARD_CONTROL_LABELS = {
     "serial_rhythm.hook_strength_by_position": "钩子位置差",
     "serial_rhythm.tension_relax_ratio": "张弛比",
     "serial_rhythm.words_curve_note": "篇幅曲线",
+    "reward_rhythm.payoff_unit": "兑现单元",
 }
 
 
@@ -873,10 +898,16 @@ def import_pack(
         ("timeline.prolepsis_ratio", "预叙占比"),
         ("timeline.scene_time_ratio", "叙述/故事时长比"),
         ("scene.description_ratio", "描写占比"),
+        ("emotion_writing.emotion_words_per_1k", "情绪词密度(每千字)"),
+        ("imagery.simile_markers_per_1k", "明喻标记密度(每千字)"),
     ):
         value = _dig(card, dotted)
         if _filled(value):
             traits.append(f"{label}：{value}")
+
+    fingerprint = _dig(card, "syntax.lexical_fingerprint")
+    if isinstance(fingerprint, list) and fingerprint:
+        traits.append("词汇指纹：" + "、".join(str(f) for f in fingerprint if _filled(f)))
 
     domains = _dig(card, "imagery.semantic_domains")
     if isinstance(domains, list) and domains:
@@ -938,6 +969,7 @@ def import_pack(
         ("serial_rhythm.arc_length", "高潮弧跨度：{v} 章"),
         ("serial_rhythm.arc_recovery", "高潮后缓冲：{v} 章"),
         ("serial_rhythm.cliffhanger_frequency", "强断章频率：{v}"),
+        ("reward_rhythm.payoff_interval", "小回报间隔：每 {v} 章"),
     ):
         value = _dig(card, dotted)
         if _filled(value):
