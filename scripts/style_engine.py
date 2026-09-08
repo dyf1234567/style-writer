@@ -419,6 +419,16 @@ def _filters(family: str | None, source_lore: bool, alias: str = "p") -> tuple[s
     return " AND ".join(clauses), params
 
 
+def _scope_count(conn: sqlite3.Connection, family: str | None, source_lore: bool) -> int:
+    """Passages actually inside the requested retrieval scope.
+
+    Zero here means the query could not have matched anything, which is a
+    different fact from "the query matched nothing".
+    """
+    where, params = _filters(family, source_lore)
+    return int(conn.execute(f"SELECT COUNT(*) FROM passages p WHERE {where}", params).fetchone()[0])
+
+
 def query_index(
     author: str,
     query: str,
@@ -430,14 +440,36 @@ def query_index(
     endpoint: str | None = None,
     with_full_text: bool = False,
 ) -> dict:
-    resolve_pack(author, authors_root)
+    _, pack = resolve_pack(author, authors_root)
     index_path = resolve_index(author, index_root)
     if not index_path.exists():
-        return {"ok": False, "mode": "static", "error": f"index not found: {index_path}", "hits": []}
+        return {
+            "ok": False,
+            "mode": "no-index",
+            "index_found": False,
+            "passages_in_scope": 0,
+            "error": f"index not found: {index_path}",
+            "hits": [],
+        }
     conn = _connect_readonly(index_path)
     conn.row_factory = sqlite3.Row
     meta = _meta(conn)
     where, params = _filters(family, source_lore)
+    scope = _scope_count(conn, family, source_lore)
+    if scope == 0:
+        conn.close()
+        candidates = [str(entry.get("id")) for entry in pack.get("families", []) if entry.get("id")]
+        candidates += [str(pack.get("default_family") or ""), str(pack.get("unmatched_family") or "")]
+        known = sorted({c for c in candidates if c})
+        return {
+            "ok": False,
+            "mode": "empty-scope",
+            "index_found": True,
+            "passages_in_scope": 0,
+            "error": (f"索引里没有 family={family!r}、is_lore={1 if source_lore else 0} 的 passage，"
+                      f"检索不可能命中（可用 family: {known or '无'}；改过 pack 后先跑 reclassify 或 build）"),
+            "hits": [],
+        }
     lexical: list[sqlite3.Row] = []
     fq = fts_query(query)
     if fq:
@@ -481,7 +513,9 @@ def query_index(
         conn.close()
         return {
             "ok": True,
-            "mode": "static",
+            "mode": "no-match",
+            "index_found": True,
+            "passages_in_scope": scope,
             "hits": [],
             "style_metrics": {},
             "vector_error": vector_error,
@@ -512,6 +546,8 @@ def query_index(
     return {
         "ok": True,
         "mode": mode,
+        "index_found": True,
+        "passages_in_scope": scope,
         "hits": hits,
         "style_metrics": derive_style_metrics(selected_texts),
         "vector_error": vector_error,
@@ -533,11 +569,31 @@ def prepare_context(
     _, pack = resolve_pack(author, authors_root)
     chosen_family = family or str(pack.get("default_family", "default"))
     retrieval = query_index(author, query, authors_root, index_root, chosen_family, limit, source_lore, endpoint)
+    if retrieval.get("mode") == "empty-scope":
+        return {
+            "ok": False,
+            "author": author,
+            "query": query,
+            "mode": "empty-scope",
+            "index_found": True,
+            "passages_in_scope": 0,
+            "error": retrieval.get("error"),
+            "writing_context": {"traits": pack.get("traits", [])},
+        }
     family_label = chosen_family
     for entry in pack.get("families", []):
         if entry.get("id") == chosen_family:
             family_label = str(entry.get("label", chosen_family))
             break
+    retrieval_mode = str(retrieval.get("mode", "no-index"))
+    # "static" is the documented pack-only fallback: it is what callers get when
+    # there is no index at all, so the reason is reported separately in retrieval_note.
+    mode = "static" if retrieval_mode == "no-index" else retrieval_mode
+    notes = {
+        "no-index": f"未找到索引 {resolve_index(author, index_root)}；仅使用静态画像（先跑 build）",
+        "no-match": (f"索引里有 {retrieval.get('passages_in_scope')} 条 passage，但没有一条与该 query 命中；"
+                     "retrieval_metrics 为空不代表风格不匹配"),
+    }
     context = {
         "positioning": pack.get("positioning", "high-level inspiration only"),
         "family": {"id": chosen_family, "label": family_label},
@@ -561,7 +617,13 @@ def prepare_context(
         "ok": True,
         "author": author,
         "query": query,
-        "mode": retrieval.get("mode", "static"),
+        "mode": mode,
+        "retrieval_note": notes.get(retrieval_mode) or (
+            f"vector 检索失败，已降级为 {mode}：{retrieval['vector_error']}"
+            if retrieval.get("vector_error") else None
+        ),
+        "index_found": bool(retrieval.get("index_found")),
+        "passages_in_scope": retrieval.get("passages_in_scope", 0),
         "writing_context": context,
         "evidence": evidence,
         "vector_error": retrieval.get("vector_error"),
@@ -632,13 +694,39 @@ def audit_overlap(
 ) -> dict:
     text = normalize_text(read_text(Path(input_path)))
     probes = list(iter_chunks(text, target=260, maximum=420, minimum=40))
+    if not probes:
+        return {
+            "ok": False,
+            "verdict": "error",
+            "input": str(Path(input_path)),
+            "probes": 0,
+            "error": "输入没有可比较的片段（空文件，或短于一个 probe）",
+            "warnings": [],
+        }
     warnings = []
+    probes_with_candidates = 0
+    scope = 0
     for probe_no, probe in enumerate(probes, 1):
         result = query_index(
             author, probe, authors_root, index_root, family, 5, False,
             with_full_text=True,
         )
-        for hit in result.get("hits", []):
+        if result.get("mode") in ("no-index", "empty-scope"):
+            return {
+                "ok": False,
+                "verdict": "error",
+                "input": str(Path(input_path)),
+                "probes": len(probes),
+                "mode": result.get("mode"),
+                "passages_in_scope": result.get("passages_in_scope", 0),
+                "error": result.get("error"),
+                "warnings": [],
+            }
+        scope = int(result.get("passages_in_scope") or 0)
+        hits = result.get("hits", [])
+        if hits:
+            probes_with_candidates += 1
+        for hit in hits:
             # v2 修复：旧实现用 hit["snippet"]（chunk 前 360 字）比对，
             # 抄写落在长 chunk 第 360 字之后即整段漏检。现取完整 chunk 文本；
             # full_text 由 with_full_text 显式开启，不进入任何对外输出。
@@ -655,13 +743,25 @@ def audit_overlap(
                     "generated_excerpt": probe[:160],
                 })
                 break
+    # 一个候选都没捞到 = 这次运行没有真正比对过任何文本，不能读成「干净」。
+    inconclusive = probes_with_candidates == 0
+    verdict = "review" if warnings else ("inconclusive" if inconclusive else "clean")
     return {
-        "ok": True,
+        "ok": not inconclusive,
         "input": str(Path(input_path)),
+        "verdict": verdict,
         "probes": len(probes),
+        "probes_with_candidates": probes_with_candidates,
+        "passages_in_scope": scope,
         "warnings": warnings,
         "requires_manual_review": bool(warnings),
-        "note": "命中仅表示需要人工复核，不自动判定抄袭",
+        "coverage": f"{probes_with_candidates}/{len(probes)} 个 probe 取到候选文本",
+        "note": (
+            "只检测连续重合（默认 ≥24 字）：改词换序式抄写不在检测范围内；"
+            "clean 只表示相对已索引语料无连续重合"
+            + ("；inconclusive = 检索没有取回任何候选，本次运行不构成结论，请检查 build/family"
+               if inconclusive else "")
+        ),
     }
 
 

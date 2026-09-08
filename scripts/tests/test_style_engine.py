@@ -12,6 +12,9 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 import style_engine
 
+# 与夹具语料没有任何共同二元组的文本：检索必然空手而归，用来验证「空跑不算通过」
+NO_OVERLAP_TEXT = "鑫犉" * 90
+
 
 class StyleEngineTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -190,6 +193,91 @@ class StyleEngineTests(unittest.TestCase):
             )
         finally:
             os.environ.pop("DEMO2_STYLE_CORPUS", None)
+
+    # ------------------------------------------------ 空跑不得判「干净」
+    def test_audit_without_index_is_not_a_pass(self) -> None:
+        draft = self.root / "copy.txt"
+        draft.write_text("雨夜里的少年把旧车票折好。他说没关系，手指却一直按着口袋。" * 4, encoding="utf-8")
+        result = style_engine.audit_overlap("demo", draft, self.authors, self.indexes, family="modern")
+        self.assertFalse(result["ok"], "缺索引时必须报错，不能返回干净")
+        self.assertEqual(result["mode"], "no-index")
+        self.assertEqual(result["verdict"], "error")
+        code = style_engine.main([
+            "audit-overlap", "--author", "demo", "--input", str(draft),
+            "--authors-root", str(self.authors), "--index-root", str(self.indexes),
+            "--family", "modern",
+        ])
+        self.assertNotEqual(code, 0, "发布闸门靠退出码把关")
+
+    def test_audit_unknown_family_is_not_a_pass(self) -> None:
+        self.build("none")
+        draft = self.root / "copy3.txt"
+        draft.write_text("雨夜里的少年把旧车票折好。他说没关系，手指却一直按着口袋。" * 4, encoding="utf-8")
+        result = style_engine.audit_overlap("demo", draft, self.authors, self.indexes, family="mordern")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["mode"], "empty-scope")
+        self.assertIn("modern", str(result["error"]))
+
+    def test_audit_with_no_candidate_is_inconclusive(self) -> None:
+        """逐字抄写之外的另一种空跑：检索一个候选都没取到，不能读成 clean。"""
+        self.build("none")
+        draft = self.root / "odd.txt"
+        draft.write_text(NO_OVERLAP_TEXT, encoding="utf-8")
+        result = style_engine.audit_overlap("demo", draft, self.authors, self.indexes, family="modern")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["verdict"], "inconclusive")
+        self.assertEqual(result["probes_with_candidates"], 0)
+        self.assertGreater(result["passages_in_scope"], 0)
+
+    def test_audit_flags_review_when_candidates_were_copied(self) -> None:
+        self.build("none")
+        draft = self.root / "odd2.txt"
+        draft.write_text(
+            NO_OVERLAP_TEXT + "\n\n" + "雨夜里的少年把旧车票折好。他说没关系，手指却一直按着口袋。" * 10,
+            encoding="utf-8",
+        )
+        result = style_engine.audit_overlap("demo", draft, self.authors, self.indexes, family="modern")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["verdict"], "review")
+        self.assertGreater(result["probes_with_candidates"], 0)
+
+    def test_audit_can_say_clean_once_candidates_were_compared(self) -> None:
+        """取到候选但连续重合不够长 -> clean；与「一个候选都没取到」区分开。"""
+        self.build("none")
+        draft = self.root / "odd3.txt"
+        draft.write_text(NO_OVERLAP_TEXT + "\n\n" + "雨夜里的少年" + "鑫" * 250, encoding="utf-8")
+        result = style_engine.audit_overlap("demo", draft, self.authors, self.indexes, family="modern")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["verdict"], "clean")
+        self.assertEqual(result["warnings"], [])
+        self.assertGreater(result["probes_with_candidates"], 0)
+
+    def test_prepare_keeps_static_label_but_says_why(self) -> None:
+        result = style_engine.prepare_context("demo", "雨夜 少年", self.authors, self.indexes, family="modern")
+        self.assertEqual(result["mode"], "static")
+        self.assertFalse(result["index_found"])
+        self.assertIn("未找到索引", result["retrieval_note"])
+
+    def test_prepare_distinguishes_no_match_from_static(self) -> None:
+        self.build("none")
+        result = style_engine.prepare_context("demo", NO_OVERLAP_TEXT, self.authors, self.indexes, family="modern")
+        self.assertEqual(result["mode"], "no-match")
+        self.assertTrue(result["index_found"])
+        self.assertGreater(result["passages_in_scope"], 0)
+        self.assertEqual(result["writing_context"]["retrieval_metrics"], {})
+        self.assertIn("没有一条", result["retrieval_note"])
+
+    def test_prepare_errors_on_unknown_family(self) -> None:
+        self.build("none")
+        result = style_engine.prepare_context("demo", "雨夜 少年", self.authors, self.indexes, family="mordern")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["mode"], "empty-scope")
+        code = style_engine.main([
+            "prepare", "--author", "demo", "--query", "雨夜 少年",
+            "--authors-root", str(self.authors), "--index-root", str(self.indexes),
+            "--family", "mordern",
+        ])
+        self.assertNotEqual(code, 0)
 
 
 if __name__ == "__main__":
