@@ -2,6 +2,11 @@
 
 An author pack is a small portable directory. It contains metadata and abstracted style guidance, never the source corpus or vector database.
 
+A pack has two producers: hand-writing this contract's fields, or bridging a filled
+analysis style card with `import-pack` (see the repository README). The card in
+`analysis/` is the single source of truth for abstract style; regenerate the pack
+with `--force` after editing a card instead of maintaining both by hand.
+
 ## Files
 
 `pack.json` is required. `profile.md` is optional human-readable guidance.

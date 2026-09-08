@@ -4,6 +4,13 @@ A portable Codex skill for building and applying author-inspired Chinese prose s
 
 The workflow is designed for high-level inspiration rather than exact impersonation. Project characters, canon, facts, and voice take priority over every style pack.
 
+The repository spans both sides of the style pipeline:
+
+- `analysis/` — style **recognition**: read a reference work and converge it into an abstract `style-card.yaml` (9-dimension report + `measure.py` quantification; formerly the standalone novel-style-kit project). Method only — never plot, names, or prose.
+- `scripts/style_engine.py` — style **execution**: index a corpus, retrieve per-scene writing context, audit drafts for source overlap.
+
+`import-pack` is the bridge between them: a filled style card becomes a runtime `pack.json`. See [From card to pack](#from-card-to-pack).
+
 ## Install
 
 Copy or clone this repository to the Codex skills directory so the entrypoint is located at:
@@ -34,6 +41,36 @@ python scripts/style_engine.py audit-overlap --author example-author --input pat
 ```
 
 Use `--provider none` for an FTS5-only index. `prepare` excludes source prose by default and returns compact statistics and abstract controls. Source excerpts require explicit opt-in and must not be copied, continued, or closely paraphrased.
+
+## Analysis: from a work to a style card
+
+Run the recognition pipeline in `analysis/` (details in [`analysis/README.md`](analysis/README.md)):
+
+```powershell
+python analysis/scripts/measure.py <work.txt|work.epub> -o metrics.json
+# fill analysis/analysis-report.template.md, converge to style-card.yaml,
+# pass the card's red-line self-check, then bridge it:
+```
+
+## From card to pack
+
+`import-pack` converts a filled style card into a `pack.json` under `AUTHOR_STYLE_HOME`. It is the only sanctioned path from the analysis stage into runtime packs:
+
+```powershell
+python scripts/style_engine.py import-pack --author example-style --card style-card.yaml
+```
+
+Mapping: abstract `voice/timeline/scene/syntax/dialogue_style/imagery` fields and quantified statistics become `traits`; plotline weights and serial-rhythm numbers become `scene_controls`; card `imagery.taboo` entries extend `negative_constraints`. Unfilled template defaults (`0`, `""`, `[]`) are skipped; an all-empty card is rejected.
+
+The bridge enforces red lines programmatically:
+
+- `meta.target_work` must not leak into any pack field;
+- any value containing curly Chinese quotes (`“ ”`) is treated as a source-excerpt leak and rejected;
+- `plotlines` weights must sum to 1.0 (±0.06).
+
+Cards use a restricted YAML subset (mappings, scalars, lists, inline comments — no multiline scalars or anchors), parsed without third-party dependencies.
+
+After importing, `status`, `build`, `prepare`, and `audit-overlap` work on the new author as usual. Packs created by the bridge carry no `families`; add them manually to `pack.json` if the corpus has subdirectories worth routing.
 
 ## Data and rights
 

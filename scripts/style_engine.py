@@ -653,6 +653,347 @@ def audit_overlap(
     }
 
 
+# ---------------------------------------------------------------- card → pack
+
+
+CARD_TRAIT_LABELS = {
+    "voice.person": "叙述人称",
+    "voice.focalization": "聚焦方式",
+    "voice.reliability": "叙述可靠性",
+    "voice.distance": "叙述距离",
+    "voice.tense": "时态",
+    "timeline.base_order": "基准时序",
+    "timeline.ellipsis_span": "典型省略",
+    "scene.show_vs_tell": "展示/讲述分工",
+    "scene.sensory_mix": "感官配比",
+    "scene.scenery_function": "景物功能",
+    "syntax.register": "语域",
+    "syntax.sentence_rhythm_note": "句法节奏",
+    "dialogue_style.subtext_density": "潜台词密度",
+    "dialogue_style.individuality": "角色语言区分度",
+    "dialogue_style.exposition_in_dialogue": "对白承载背景",
+    "imagery.metaphor_type": "比喻偏好",
+    "imagery.recurrence_interval": "意象复现节律",
+}
+
+CARD_CONTROL_LABELS = {
+    "plotlines.switch_trigger": "切线触发",
+    "plotlines.switch_transition": "切线过渡",
+    "plotlines.line_close_pattern": "支线收束方式",
+    "serial_rhythm.chapter_hook_type": "章末钩子",
+    "serial_rhythm.hook_strength_by_position": "钩子位置差",
+    "serial_rhythm.tension_relax_ratio": "张弛比",
+    "serial_rhythm.words_curve_note": "篇幅曲线",
+}
+
+
+def _strip_comment(raw: str) -> str:
+    """去掉行内注释；带引号的值只认闭合引号后的注释。"""
+    text = raw.strip()
+    if text.startswith("#"):
+        return ""
+    if text[:1] in ("\"", "'"):
+        quote = text[0]
+        end = text.find(quote, 1)
+        return text[: end + 1] if end != -1 else text
+    cut = text.find(" #")
+    return text[:cut].strip() if cut != -1 else text
+
+
+def _scalar(raw: str):
+    text = _strip_comment(raw)
+    if not text:
+        return ""
+    if text == "[]":
+        return []
+    if text[:1] == "[" and text[-1:] == "]":
+        inner = text[1:-1].strip()
+        return [] if not inner else [_scalar(part.strip()) for part in inner.split(",")]
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("\"", "'"):
+        return text[1:-1]
+    lowered = text.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    return text
+
+
+def _parse_restricted(text: str) -> dict:
+    """只支持 style-card 模板用到的 YAML 子集：映射、标量列表、映射列表、
+    行注释、流式空列表/短列表。其余（多行标量、锚点、制表符缩进）直接报错。
+    """
+    rows: list[tuple[int, int, str]] = []
+    for no, raw in enumerate(text.splitlines(), 1):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if "\t" in raw[:indent]:
+            raise ValueError(f"line {no}: tabs are not supported")
+        rows.append((no, indent, stripped))
+    index = 0
+
+    def parse_mapping(indent: int) -> dict:
+        nonlocal index
+        out: dict = {}
+        while index < len(rows):
+            no, cur, content = rows[index]
+            if cur < indent:
+                break
+            if cur > indent:
+                raise ValueError(f"line {no}: unexpected indentation")
+            if content.startswith("- "):
+                raise ValueError(f"line {no}: list item in mapping context")
+            key, sep, rest = content.partition(":")
+            if not sep:
+                raise ValueError(f"line {no}: expect \"key: value\"")
+            key = key.strip()
+            index += 1
+            if _strip_comment(rest):
+                out[key] = _scalar(rest)
+            elif index < len(rows) and rows[index][1] > indent:
+                child_indent = rows[index][1]
+                out[key] = (
+                    parse_sequence(child_indent)
+                    if rows[index][2].startswith("- ")
+                    else parse_mapping(child_indent)
+                )
+            else:
+                out[key] = ""
+        return out
+
+    def parse_sequence(indent: int) -> list:
+        nonlocal index
+        items: list = []
+        while index < len(rows):
+            no, cur, content = rows[index]
+            if cur != indent or not content.startswith("- "):
+                break
+            body = content[2:].strip()
+            index += 1
+            if body[:1] in ("\"", "'") or ":" not in body:
+                items.append(_scalar(body))
+                continue
+            key, _sep, rest = body.partition(":")
+            item = {key.strip(): _scalar(rest)}
+            while index < len(rows) and rows[index][1] > indent and not rows[index][2].startswith("- "):
+                c_no, _c, c_content = rows[index]
+                c_key, c_sep, c_rest = c_content.partition(":")
+                if not c_sep:
+                    raise ValueError(f"line {c_no}: expect \"key: value\" inside list item")
+                item[c_key.strip()] = _scalar(c_rest)
+                index += 1
+            items.append(item)
+        return items
+
+    if not rows:
+        return {}
+    if rows[0][2].startswith("- "):
+        raise ValueError("style card root must be a mapping")
+    return parse_mapping(rows[0][1])
+
+
+def _dig(obj: object, dotted: str):
+    cur: object = obj
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _filled(value) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, (list, dict)):
+        return len(value) > 0
+    return value is not None
+
+
+def _iter_strings(obj: object):
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            yield from _iter_strings(value)
+    elif isinstance(obj, list):
+        for value in obj:
+            yield from _iter_strings(value)
+
+
+def import_pack(
+    author: str,
+    card_path: str | Path,
+    authors_root: str | Path | None = None,
+    display_name: str | None = None,
+    corpus_env: str | None = None,
+    force: bool = False,
+) -> dict:
+    """style-card.yaml → pack.json 桥接（识别侧产物进入执行侧的唯一通道）。
+
+    0/""/[] 视为模板未填，跳过。红线在桥里程序化把关：
+    meta.target_work 禁止泄漏进 pack；任何字段值含中文弯引号视为原文摘录，拒绝。
+    """
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", author):
+        raise ValueError(f"invalid slug: {author}（用小写字母/数字/-/_）")
+    card_file = Path(card_path).expanduser()
+    if not card_file.exists():
+        raise FileNotFoundError(f"style card not found: {card_file}")
+    card = _parse_restricted(read_text(card_file))
+    if not isinstance(card, dict) or not card:
+        raise ValueError("style card is empty or not a mapping")
+
+    traits: list[str] = []
+    controls: list[str] = []
+    for dotted, label in CARD_TRAIT_LABELS.items():
+        value = _dig(card, dotted)
+        if isinstance(value, str) and value.strip():
+            traits.append(f"{label}：{value.strip()}")
+    for dotted, label in CARD_CONTROL_LABELS.items():
+        value = _dig(card, dotted)
+        if isinstance(value, str) and value.strip():
+            controls.append(f"{label}：{value.strip()}")
+
+    for dotted, label in (
+        ("voice.narrator_comment_ratio", "叙述者评论占比"),
+        ("timeline.analepsis_ratio", "倒叙占比"),
+        ("timeline.prolepsis_ratio", "预叙占比"),
+        ("timeline.scene_time_ratio", "叙述/故事时长比"),
+        ("scene.description_ratio", "描写占比"),
+    ):
+        value = _dig(card, dotted)
+        if _filled(value):
+            traits.append(f"{label}：{value}")
+
+    domains = _dig(card, "imagery.semantic_domains")
+    if isinstance(domains, list) and domains:
+        traits.append("高频语义域：" + "、".join(str(d) for d in domains))
+
+    wc = _dig(card, "serial_rhythm.words_per_chapter")
+    if isinstance(wc, dict) and _filled(wc.get("median")):
+        traits.append(f"章字数：中位 {wc['median']}（p10 {wc.get('p10', '-')} / p90 {wc.get('p90', '-')}）")
+    sl = _dig(card, "syntax.sentence_len")
+    if isinstance(sl, dict):
+        bits = [f"中位 {sl['median']}" for _ in [0] if _filled(sl.get("median"))]
+        bits += [f"p90 {sl['p90']}" for _ in [0] if _filled(sl.get("p90"))]
+        bits += [f"短句≤10 占 {sl['short_le10_ratio']}" for _ in [0] if _filled(sl.get("short_le10_ratio"))]
+        bits += [f"长句≥40 占 {sl['long_ge40_ratio']}" for _ in [0] if _filled(sl.get("long_ge40_ratio"))]
+        if bits:
+            traits.append("句长：" + " / ".join(bits))
+    pl = _dig(card, "syntax.paragraph_len")
+    if isinstance(pl, dict):
+        bits = [f"中位 {pl['median']}" for _ in [0] if _filled(pl.get("median"))]
+        bits += [f"p90 {pl['p90']}" for _ in [0] if _filled(pl.get("p90"))]
+        bits += [f"短段占比 {pl['short_para_ratio']}" for _ in [0] if _filled(pl.get("short_para_ratio"))]
+        if bits:
+            traits.append("段长：" + " / ".join(bits))
+    if _filled(_dig(card, "syntax.dialogue_char_ratio")) or _filled(_dig(card, "syntax.dialogue_blocks_per_1k")):
+        traits.append(
+            f"对话：字符占比 {_dig(card, 'syntax.dialogue_char_ratio') or 0}"
+            f" / 每千字 {_dig(card, 'syntax.dialogue_blocks_per_1k') or 0} 块"
+        )
+    punct = _dig(card, "syntax.punct_per_1k")
+    if isinstance(punct, dict):
+        bits = [
+            f"{name} {punct[name]}"
+            for name in ("exclam", "question", "ellipsis", "dash")
+            if _filled(punct.get(name))
+        ]
+        if bits:
+            traits.append("标点每千字：" + "、".join(bits))
+
+    lines = _dig(card, "plotlines.lines")
+    weights: list[float] = []
+    if isinstance(lines, list):
+        for entry in lines:
+            if not isinstance(entry, dict):
+                continue
+            parts = [str(entry[k]) for k in ("role", "function") if _filled(entry.get(k))]
+            if _filled(entry.get("pov")):
+                parts.append(f"视角 {entry['pov']}")
+            if _filled(entry.get("weight")):
+                parts.append(f"权重 {entry['weight']}")
+                weights.append(float(entry["weight"]))
+            if parts:
+                controls.append(f"情节线 {entry.get('id', '?')}：" + "·".join(parts))
+    if weights and abs(sum(weights) - 1.0) > 0.06:
+        raise ValueError(f"plotlines 权重和应为 1.0，实际 {round(sum(weights), 2)}（回卡内核对）")
+    for dotted, text in (
+        ("plotlines.count", "活跃线数：{v}"),
+        ("plotlines.convergence_every", "主线副线交汇：每 {v} 章"),
+        ("serial_rhythm.scenes_per_chapter", "章均场景数：{v}"),
+        ("serial_rhythm.arc_length", "高潮弧跨度：{v} 章"),
+        ("serial_rhythm.arc_recovery", "高潮后缓冲：{v} 章"),
+        ("serial_rhythm.cliffhanger_frequency", "强断章频率：{v}"),
+    ):
+        value = _dig(card, dotted)
+        if _filled(value):
+            controls.append(text.format(v=value))
+    scene_words = _dig(card, "scene.scene_words")
+    if isinstance(scene_words, list) and len(scene_words) == 2 and any(_filled(w) for w in scene_words):
+        controls.append(f"单场景字数区间：{scene_words[0]}-{scene_words[1]}")
+
+    negatives = ["禁止复刻原作语句、人名、地名与具体情节"]
+    taboo = _dig(card, "imagery.taboo")
+    if isinstance(taboo, list):
+        negatives += [str(t) for t in taboo if _filled(t)]
+    if not traits:
+        raise ValueError("style card 未填写任何方法字段，无可导入内容")
+
+    sample_range = str(_dig(card, "meta.sample_range") or "").strip()
+    pack = {
+        "schema_version": SCHEMA_VERSION,
+        "slug": author,
+        "display_name": display_name or f"{author}-inspired",
+        "positioning": "高维抽象特征，仅方法不含内容"
+        + (f"（样本 {sample_range}）" if sample_range else ""),
+        "corpus": {"env": corpus_env or f"{re.sub(r'[^A-Z0-9]', '_', author.upper())}_CORPUS"},
+        "families": [],
+        "default_family": "other",
+        "unmatched_family": "other",
+        "exclude_patterns": ["设定集", "人物小传"],
+        "traits": traits,
+        "scene_controls": controls,
+        "negative_constraints": negatives,
+    }
+
+    target_work = str(_dig(card, "meta.target_work") or "").strip()
+    if target_work and target_work in json.dumps(pack, ensure_ascii=False):
+        raise ValueError(f"红线：meta.target_work「{target_work}」泄漏进了卡片字段，先回卡内清除")
+    for value in _iter_strings(pack):
+        if "“" in value or "”" in value:
+            raise ValueError(f"红线：字段值含中文弯引号，疑似原文摘录：{value[:40]}")
+
+    root = Path(authors_root).expanduser() if authors_root else _default_author_root()
+    pack_dir = root / author
+    pack_file = pack_dir / "pack.json"
+    if pack_file.exists() and not force:
+        raise FileExistsError(f"pack exists: {pack_file}（--force 覆盖）")
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    pack_file.write_text(json.dumps(pack, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "author": author,
+        "pack": str(pack_file),
+        "traits": len(traits),
+        "scene_controls": len(controls),
+        "negative_constraints": len(negatives),
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Portable author-inspired style engine")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -687,6 +1028,16 @@ def _parser() -> argparse.ArgumentParser:
     p_audit.add_argument("--family")
     p_audit.add_argument("--ratio-threshold", type=float, default=0.72)
     p_audit.add_argument("--exact-run-threshold", type=int, default=24)
+    p_import = sub.add_parser(
+        "import-pack",
+        help="bridge an analysis style-card into a runtime pack.json",
+    )
+    p_import.add_argument("--author", required=True)
+    p_import.add_argument("--card", required=True, help="path to style-card.yaml")
+    p_import.add_argument("--authors-root")
+    p_import.add_argument("--display-name")
+    p_import.add_argument("--corpus-env", help="corpus env var name for the generated pack")
+    p_import.add_argument("--force", action="store_true", help="overwrite existing pack.json")
     return parser
 
 
@@ -705,6 +1056,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = query_index(**values)
         elif command == "prepare":
             result = prepare_context(**values)
+        elif command == "import-pack":
+            values["card_path"] = values.pop("card")
+            result = import_pack(**values)
         else:
             values["input_path"] = values.pop("input")
             result = audit_overlap(**values)

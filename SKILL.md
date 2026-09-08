@@ -9,6 +9,7 @@ Use author packs as reusable writing references, not as claims of authorship or 
 
 ## Route the task
 
+- To turn a reference work into a style profile (author analysis), read [analysis/README.md](analysis/README.md): measure the corpus, fill the 9-dimension report, converge to a `style-card.yaml`, then `import-pack` it into a runtime pack.
 - For ordinary style-guided writing or revision, resolve the author pack and run `scripts/style_engine.py prepare` before drafting.
 - For building or refreshing a corpus index, read [references/workflows.md](references/workflows.md).
 - For creating or moving author packs, read [references/pack-contract.md](references/pack-contract.md).
@@ -22,6 +23,7 @@ Use author packs as reusable writing references, not as claims of authorship or 
 - A static profile is a valid portable fallback. FTS5 adds lexical retrieval; embeddings add semantic retrieval but are optional machine-local dependencies.
 - Keep corpora and indexes outside the Skill. The Skill must remain small and copyable.
 - Before releasing substantial prose, run `audit-overlap`; manually inspect every warning.
+- The analysis-stage style card is the single source of truth for abstract style. Move a card into a runtime pack only through `import-pack`; never hand-copy prose, names, or plot from the analysis stage into a pack.
 
 ## Compact drafting context
 
