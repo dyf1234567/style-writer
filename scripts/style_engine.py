@@ -948,15 +948,64 @@ def _filled(value) -> bool:
     return value is not None
 
 
-def _iter_strings(obj: object):
+def _iter_paths(obj: object, prefix: str = "") -> Iterator[tuple[str, str]]:
     if isinstance(obj, str):
-        yield obj
+        yield prefix, obj
     elif isinstance(obj, dict):
-        for value in obj.values():
-            yield from _iter_strings(value)
+        for key, value in obj.items():
+            yield from _iter_paths(value, f"{prefix}.{key}" if prefix else str(key))
     elif isinstance(obj, list):
-        for value in obj:
-            yield from _iter_strings(value)
+        for index, value in enumerate(obj):
+            yield from _iter_paths(value, f"{prefix}[{index}]")
+
+
+# 原文摘录的排版痕迹：弯引号、单弯引号、直角引号、双直角引号。
+# 只拦 “” 会让「」排版的语料原文堂而皇之地通过桥（实测）。
+SOURCE_QUOTE_MARKS = "“”‘’「」『』"
+
+_CN_ONLY = re.compile(r"[^\u4e00-\u9fff]+")
+
+
+def _cn_only(text: str) -> str:
+    """只留汉字，把标点与换行剔除后比对：改标点式抄写同样要露出来。"""
+    return _CN_ONLY.sub("", text)
+
+
+def find_source_overlap(values: Iterable[tuple[str, str]], corpus_text: str,
+                        run: int = 10) -> list[dict]:
+    """返回与语料存在 >=run 连续汉字重合的字段。
+
+    只报告字段路径与重合长度，不打印命中文本，避免工具本身输出原文。
+    """
+    hay = _cn_only(corpus_text)
+    hits = []
+    for path, value in values:
+        needle = _cn_only(value)
+        if len(needle) < run:
+            continue
+        for start in range(len(needle) - run + 1):
+            if needle[start:start + run] in hay:
+                hits.append({"field": path, "run": run})
+                break
+    return hits
+
+
+def _read_corpus(explicit: str | Path | None, env_name: str) -> tuple[str | None, str | None]:
+    """桥的原文比对数据源：显式路径优先，否则读 pack 声明的语料环境变量。"""
+    if explicit:
+        root = Path(explicit).expanduser()
+    elif env_name and os.getenv(env_name):
+        root = Path(os.environ[env_name]).expanduser()
+    else:
+        return None, f"未给 --corpus-root，且语料环境变量 {env_name or '(未声明)'} 未设置"
+    if not root.exists():
+        return None, f"语料路径不存在: {root}"
+    files = [root] if root.is_file() else sorted(
+        p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in TEXT_SUFFIXES
+    )
+    if not files:
+        return None, f"语料路径下没有可读文本文件（{', '.join(TEXT_SUFFIXES)}）: {root}"
+    return "".join(read_text(path) for path in files), None
 
 
 def import_pack(
@@ -966,11 +1015,16 @@ def import_pack(
     display_name: str | None = None,
     corpus_env: str | None = None,
     force: bool = False,
+    corpus_root: str | Path | None = None,
+    overlap_run: int = 10,
 ) -> dict:
     """style-card.yaml → pack.json 桥接（识别侧产物进入执行侧的唯一通道）。
 
     0/""/[] 视为模板未填，跳过。红线在桥里程序化把关：
-    meta.target_work 禁止泄漏进 pack；任何字段值含中文弯引号视为原文摘录，拒绝。
+    meta.target_work 禁止泄漏进 pack；字段值含任何排版引号（弯引号/直角引号）
+    视为原文摘录，拒绝；能给到语料时（--corpus-root 或 pack 的语料环境变量）
+    再做一次「与原文连续重合 ≥overlap_run 字」的比对，命中即拒绝。
+    语料不可得时在结果 warnings 里明说未做该项检查，不让它冒充已通过。
     """
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", author):
         raise ValueError(f"invalid slug: {author}（用小写字母/数字/-/_）")
@@ -1105,9 +1159,38 @@ def import_pack(
     target_work = str(_dig(card, "meta.target_work") or "").strip()
     if target_work and target_work in json.dumps(pack, ensure_ascii=False):
         raise ValueError(f"红线：meta.target_work「{target_work}」泄漏进了卡片字段，先回卡内清除")
-    for value in _iter_strings(pack):
-        if "“" in value or "”" in value:
-            raise ValueError(f"红线：字段值含中文弯引号，疑似原文摘录：{value[:40]}")
+
+    for path, value in _iter_paths(pack):
+        marks = "".join(sorted({c for c in SOURCE_QUOTE_MARKS if c in value}))
+        if marks:
+            raise ValueError(
+                f"红线：字段 {path} 含弯引号/直角引号 {marks}，疑似原文摘录，回卡内改写成抽象描述"
+            )
+
+    warnings: list[str] = []
+    redline: dict = {
+        "target_work": "checked",
+        "quote_marks": "checked",
+        "source_overlap": {"status": "skipped"},
+    }
+    corpus_text, corpus_note = _read_corpus(corpus_root, str(pack["corpus"].get("env", "")))
+    if corpus_text is None:
+        redline["source_overlap"] = {"status": "skipped", "reason": corpus_note}
+        warnings.append(
+            f"红线项「与原文连续重合」未执行（{corpus_note}）；"
+            "本次导入不代表卡片里没有原句。可加 --corpus-root <目录或文件> 重跑。"
+        )
+    else:
+        hits = find_source_overlap(_iter_paths(pack), corpus_text, overlap_run)
+        redline["source_overlap"] = {
+            "status": "checked", "corpus_cn_chars": len(_cn_only(corpus_text)), "run": overlap_run,
+        }
+        if hits:
+            fields = "、".join(hit["field"] for hit in hits[:8])
+            raise ValueError(
+                f"红线：{len(hits)} 个字段与语料存在 ≥{overlap_run} 字连续重合（{fields}）；"
+                "命中原文不打印，请回卡内改写这些字段"
+            )
 
     root = Path(authors_root).expanduser() if authors_root else _default_author_root()
     pack_dir = root / author
@@ -1123,6 +1206,8 @@ def import_pack(
         "traits": len(traits),
         "scene_controls": len(controls),
         "negative_constraints": len(negatives),
+        "redline": redline,
+        "warnings": warnings,
     }
 
 
@@ -1169,6 +1254,10 @@ def _parser() -> argparse.ArgumentParser:
     p_import.add_argument("--authors-root")
     p_import.add_argument("--display-name")
     p_import.add_argument("--corpus-env", help="corpus env var name for the generated pack")
+    p_import.add_argument("--corpus-root",
+                          help="比对原文红线的语料（目录或文件）；缺省时读 pack 的语料环境变量")
+    p_import.add_argument("--overlap-run", type=int, default=10,
+                          help="与语料连续汉字重合多少字判为原句泄漏（默认 10）")
     p_import.add_argument("--force", action="store_true", help="overwrite existing pack.json")
     return parser
 

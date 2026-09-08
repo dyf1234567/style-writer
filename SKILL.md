@@ -22,7 +22,7 @@ Use author packs as reusable writing references, not as claims of authorship or 
 - Default `prepare` output to non-verbatim retrieval metrics. Include source excerpts only after the user explicitly requests them; never silently place retrieved prose in a writing prompt.
 - A static profile is a valid portable fallback. FTS5 adds lexical retrieval; embeddings add semantic retrieval but are optional machine-local dependencies.
 - Keep corpora and indexes outside the Skill. The Skill must remain small and copyable.
-- Before releasing substantial prose, run `audit-overlap`; manually inspect every warning.
+- Before releasing substantial prose, run `audit-overlap`; manually inspect every warning. Only `verdict: clean` means the run compared every probe; `inconclusive` (nothing retrieved, no index, empty scope) is not a pass. Contiguous overlap is what it detects — reworded copying is not.
 - The analysis-stage style card is the single source of truth for abstract style. Move a card into a runtime pack only through `import-pack`; never hand-copy prose, names, or plot from the analysis stage into a pack.
 
 ## Compact drafting context

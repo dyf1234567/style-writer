@@ -42,6 +42,8 @@ python scripts/style_engine.py audit-overlap --author example-author --input pat
 
 Use `--provider none` for an FTS5-only index. `prepare` excludes source prose by default and returns compact statistics and abstract controls. Source excerpts require explicit opt-in and must not be copied, continued, or closely paraphrased.
 
+`prepare` reports `mode` plus a `retrieval_note` explaining any degradation: `static` means the pack profile alone (no index built), `no-match` means the index was searched and nothing was retrieved, and a `--family` that selects no passages is an error rather than an empty result. `audit-overlap` returns `verdict: clean | review | inconclusive`; it exits non-zero unless it actually compared candidates, so a missing index or an empty scope cannot be mistaken for a clean bill of health.
+
 ## Analysis: from a work to a style card
 
 Run the recognition pipeline in `analysis/` (details in [`analysis/README.md`](analysis/README.md)):
@@ -65,8 +67,15 @@ Mapping: abstract `voice/timeline/scene/syntax/dialogue_style/imagery` fields an
 The bridge enforces red lines programmatically:
 
 - `meta.target_work` must not leak into any pack field;
-- any value containing curly Chinese quotes (`“ ”`) is treated as a source-excerpt leak and rejected;
-- `plotlines` weights must sum to 1.0 (±0.06).
+- any value containing a source quote mark (`“ ” ‘ ’ 「 」 『 』`) is treated as a
+  source-excerpt leak and rejected — corner-bracket typesetting is what used to slip through;
+- `plotlines` weights must sum to 1.0 (±0.06);
+- with a corpus available (`--corpus-root <dir|file>`, otherwise the pack's corpus
+  environment variable), any pack field sharing **10 or more consecutive Chinese characters**
+  with the source is rejected. The error names the field, never the matched text:
+  `python scripts/style_engine.py import-pack --author example-style --card style-card.yaml --corpus-root ~/corpus/example`.
+  When no corpus is reachable the import still succeeds but says so in `warnings` — a check
+  that did not run is not a check that passed.
 
 Cards use a restricted YAML subset (mappings, scalars, lists, inline comments — no multiline scalars or anchors), parsed without third-party dependencies.
 

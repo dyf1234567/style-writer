@@ -215,6 +215,62 @@ class ImportPackTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue((self.authors / "cli-style" / "pack.json").exists())
 
+    # ------------------------------------------------ 红线覆盖面
+    def _corpus(self, text: str) -> Path:
+        root = self.root / "corpus"
+        root.mkdir(exist_ok=True)
+        path = root / "work.txt"
+        path.write_text(text, encoding="utf-8")
+        return root
+
+    def test_corner_and_single_quotes_are_rejected(self) -> None:
+        for label, ins in (
+            ("「」", 'register: "口语化，常说「来了老弟」"'),
+            ("『』", 'register: "口语化，常说『来了老弟』"'),
+            ("‘’", 'register: "口语化，常说‘来了老弟’"'),
+        ):
+            with self.subTest(marks=label):
+                with self.assertRaises(ValueError) as ctx:
+                    style_engine.import_pack("corner", self._card(
+                        SAMPLE_CARD.replace('register: "口语化"', ins)), self.authors)
+                self.assertIn("直角引号", str(ctx.exception))
+
+    def test_bare_source_sentence_is_caught_by_corpus_check(self) -> None:
+        """不带任何引号的原文摘录：只有与语料比对才拦得住（旧实现完全放行）。"""
+        leaked = SAMPLE_CARD.replace(
+            'register: "口语化"', 'register: "口语化，老兵把军牌埋进雪里转身朝山口走去"'
+        )
+        corpus = self._corpus("那天雪很大。老兵把军牌埋进雪里，转身朝山口走去，再也没有回来。\n")
+        with self.assertRaises(ValueError) as ctx:
+            style_engine.import_pack("bare", self._card(leaked), self.authors, corpus_root=corpus)
+        self.assertIn("连续重合", str(ctx.exception))
+        self.assertNotIn("军牌", str(ctx.exception), "报错信息不得把原文打出来")
+
+    def test_clean_card_passes_against_unrelated_corpus(self) -> None:
+        """阴性对照：语料用词相近但没有连续重合时不得误报，否则红线会被人关掉。"""
+        corpus = self._corpus("雪下了整夜。老兵转身朝山口走去。军牌埋在雪里。" * 20)
+        result = style_engine.import_pack(
+            "clean", self._card(SAMPLE_CARD), self.authors, corpus_root=corpus)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["redline"]["source_overlap"]["status"], "checked")
+        self.assertEqual(result["warnings"], [])
+
+    def test_unreachable_corpus_is_reported_not_silently_passed(self) -> None:
+        result = style_engine.import_pack("nocorpus", self._card(SAMPLE_CARD), self.authors)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["redline"]["source_overlap"]["status"], "skipped")
+        self.assertTrue(any("未执行" in w for w in result["warnings"]), result["warnings"])
+
+    def test_cli_dispatch_accepts_corpus_root(self) -> None:
+        corpus = self._corpus("城墙外的旌旗在风里倒向北方，将军没有回头。")
+        code = style_engine.main([
+            "import-pack", "--author", "cli-corpus", "--card", str(self._card(SAMPLE_CARD)),
+            "--authors-root", str(self.authors), "--corpus-root", str(corpus), "--overlap-run", "8",
+        ])
+        self.assertEqual(code, 0)
+        pack = json.loads((self.authors / "cli-corpus" / "pack.json").read_text(encoding="utf-8"))
+        self.assertTrue(pack["traits"])
+
 
 if __name__ == "__main__":
     unittest.main()
