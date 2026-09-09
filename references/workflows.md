@@ -2,6 +2,9 @@
 
 Run commands from the Skill directory.
 
+从新作者语料开始，或为已有作者包首次建库，先读 [新作者初始化](new-author.md)。
+以下是独立命令参考；不要因为写作时缺少索引就自动执行 `build`。
+
 ## Inspect
 
 ```powershell

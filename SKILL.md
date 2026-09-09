@@ -9,6 +9,7 @@ Use author packs as reusable writing references, not as claims of authorship or 
 
 ## Route the task
 
+- 用户要求“新增作者包并建立索引”“从作品开始配置新作者”或“为已有作者包首次建库”时，先读 [新作者初始化](references/new-author.md)，串联分析、导入、依赖检查、构建和检索验收。这是宿主执行流程，不是新增 CLI 命令；仅请求分析或静态包时，不扩展为向量构建。
 - To turn a reference work into a style profile (author analysis), read [analysis/README.md](analysis/README.md): measure the corpus, fill the report (emotion writing and reward rhythm included since card v2), converge to a `style-card.yaml`, then `import-pack` it into a runtime pack.
 - For ordinary style-guided writing or revision, resolve the author pack and run `scripts/style_engine.py prepare` before drafting.
 - For building or refreshing a corpus index, read [references/workflows.md](references/workflows.md).
