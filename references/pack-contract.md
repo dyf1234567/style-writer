@@ -47,6 +47,16 @@ the default writing family.
 表示引号，双引号支持 JSON 转义。未闭合引号、引号后垃圾、嵌套流式集合
 会报错，不应按完整 YAML 规范假定支持。
 
+未加引号的 `null` / `Null` / `NULL` / `~` 是空值；带引号的版本仍是字符串。
+数值字段仅接受有限数值（模板空字符串和空值可跳过），不接受数值字符串或布尔值。
+`imagery.taboo`、`imagery.semantic_domains`、`syntax.lexical_fingerprint` 必须为字符串列表，
+块状和内联写法均检查类型。`避免:连续感叹号` 是标量，`避免: 连续感叹号` 是映射；
+要把后者作为文字，请加引号。映射键后冒号须跟空白或行尾，`pov:人物甲` 不是合法映射成员。
+
+旧包损坏或 schema/slug 不符时，普通 `--force` 不覆盖文件。修复 JSON 或在明确放弃旧配置后
+使用 `--force --discard-existing-config`，后者重置上述六项运行配置并警告；显式参数仍优先。
+不要自动选择恢复参数。所有卡片与红线检查通过后才进行同目录临时写入与原子替换。
+
 - `AUTHOR_STYLE_HOME`: author pack root; each pack is a child directory.
 - `STYLE_INDEX_HOME`: SQLite index root.
 - `STYLE_VECTOR_OLLAMA_URL`: optional Ollama endpoint; defaults to `http://127.0.0.1:11434`.

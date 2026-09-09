@@ -147,6 +147,124 @@ class ImportPackTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             style_engine.import_pack("t-from-template", TEMPLATE_PATH, self.authors)
 
+    def test_corrupt_pack_requires_explicit_recovery(self) -> None:
+        card = self._card(SAMPLE_CARD)
+        folder = self.authors / "broken"
+        folder.mkdir(parents=True)
+        target = folder / "pack.json"
+        for damaged in (b'{"schema_version":1,}', b'[]', b'\xff',
+                        b'{"schema_version":null}', b'{"schema_version":2}',
+                        b'{"schema_version":1,"slug":"someone-else"}',
+                        b'{"schema_version":1,"slug":"broken","corpus":12}',
+                        b'{"schema_version":1,"slug":"broken","families":"wrong"}'):
+            with self.subTest(damaged=damaged):
+                target.write_bytes(damaged)
+                with self.assertRaisesRegex(ValueError, "discard-existing-config"):
+                    style_engine.import_pack("broken", card, self.authors, force=True)
+                self.assertEqual(target.read_bytes(), damaged)
+                result = style_engine.import_pack("broken", card, self.authors, force=True,
+                                                 discard_existing_config=True)
+                self.assertTrue(any("已放弃旧配置" in w for w in result["warnings"]))
+                _, restored = style_engine.resolve_pack("broken", self.authors)
+                self.assertEqual(restored["default_family"], "other")
+
+    def test_discard_requires_force_and_cli_accepts_pair(self) -> None:
+        card = self._card(SAMPLE_CARD)
+        with self.assertRaisesRegex(ValueError, "必须与 --force"):
+            style_engine.import_pack("new", card, self.authors, discard_existing_config=True)
+        self.assertFalse((self.authors / "new").exists())
+        args = ["import-pack", "--author", "new", "--card", str(card),
+                "--authors-root", str(self.authors), "--discard-existing-config"]
+        self.assertNotEqual(style_engine.main(args), 0)
+        self.assertEqual(style_engine.main(args + ["--force"]), 0)
+
+    def test_force_does_not_swallow_permission_error(self) -> None:
+        card = self._card(SAMPLE_CARD)
+        style_engine.import_pack("permission", card, self.authors)
+        with patch.object(style_engine, "resolve_pack", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                style_engine.import_pack("permission", card, self.authors, force=True)
+
+    def test_redline_failure_preserves_old_bytes(self) -> None:
+        card = self._card(SAMPLE_CARD)
+        style_engine.import_pack("safe", card, self.authors)
+        target = self.authors / "safe" / "pack.json"
+        original = target.read_bytes()
+        card = self._card(SAMPLE_CARD.replace('person: "第三人称"', 'person: "“原句”"'))
+        for discard in (False, True):
+            with self.assertRaisesRegex(ValueError, "红线"):
+                style_engine.import_pack("safe", card, self.authors, force=True,
+                                         discard_existing_config=discard)
+            self.assertEqual(target.read_bytes(), original)
+
+    def test_atomic_write_and_replace_failures_preserve_old_bytes(self) -> None:
+        card = self._card(SAMPLE_CARD)
+        style_engine.import_pack("safe", card, self.authors)
+        target = self.authors / "safe" / "pack.json"
+        original = target.read_bytes()
+        with patch.object(style_engine.os, "replace", side_effect=OSError("replace failed")):
+            with self.assertRaises(OSError):
+                style_engine.import_pack("safe", card, self.authors, force=True)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertEqual(list(target.parent.glob(".pack-*.tmp")), [])
+        factory = style_engine.tempfile.NamedTemporaryFile
+
+        def failing_file(*args, **kwargs):
+            stream = factory(*args, **kwargs)
+            write = stream.write
+
+            def partial_write(text):
+                write(text[:10])
+                stream.flush()
+                raise OSError("disk full")
+
+            stream.write = partial_write
+            return stream
+
+        with patch.object(style_engine.tempfile, "NamedTemporaryFile", side_effect=failing_file):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                style_engine.import_pack("safe", card, self.authors, force=True)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertEqual(list(target.parent.glob(".pack-*.tmp")), [])
+
+    def test_null_numeric_fields_skip_and_quoted_null_is_not_numeric(self) -> None:
+        for literal in ("null", "Null", "NULL", "~"):
+            with self.subTest(literal=literal):
+                self.assertIsNone(style_engine._scalar(literal))
+                card = self._card(SAMPLE_CARD.replace("description_ratio: 0.22", "description_ratio: " + literal))
+                style_engine.import_pack("nullable", card, self.authors, force=True)
+                _, pack = style_engine.resolve_pack("nullable", self.authors)
+                self.assertFalse(any("描写占比" in t for t in pack["traits"]))
+        self.assertEqual(style_engine._scalar('"null"'), "null")
+        for literal in ('"null"', '"0.2"', "true", "false", "NaN", "inf", "-inf", ".nan"):
+            with self.subTest(literal=literal):
+                card = self._card(SAMPLE_CARD.replace("description_ratio: 0.22", "description_ratio: " + literal))
+                with self.assertRaisesRegex(ValueError, "scene.description_ratio"):
+                    style_engine.import_pack("invalid", card, self.authors)
+
+    def test_colon_rules_and_mapping_contexts(self) -> None:
+        for literal, expected in (("避免:连续感叹号", "避免:连续感叹号"),
+                                  ('"避免: 连续感叹号"', "避免: 连续感叹号"),
+                                  ("https://example.test", "https://example.test"),
+                                  ("12:30", "12:30")):
+            self.assertEqual(style_engine._parse_restricted("items:\n  - " + literal)["items"], [expected])
+        self.assertEqual(style_engine._parse_restricted("items:\n  - 避免: 连续感叹号")["items"],
+                         [{"避免": "连续感叹号"}])
+        for text in ("pov:人物甲", "plotlines:\n  lines:\n    - id: A\n      pov:人物甲"):
+            with self.assertRaises(ValueError):
+                style_engine._parse_restricted(text)
+        parsed = style_engine._parse_restricted("plotlines:\n  lines:\n    - id: A\n      pov: 人物甲")
+        self.assertEqual(parsed["plotlines"]["lines"][0]["pov"], "人物甲")
+
+    def test_all_string_lists_validate_block_and_inline_items(self) -> None:
+        for section, name in (("imagery", "taboo"), ("imagery", "semantic_domains"),
+                              ("syntax", "lexical_fingerprint")):
+            for value in ("\n    - 避免: 连续感叹号", "[123, true]", "[null]", "123"):
+                with self.subTest(field=name, value=value):
+                    card = self._card("voice:\n  person: 第三人称\n" + section + ":\n  " + name + ": " + value)
+                    with self.assertRaisesRegex(ValueError, section + r"\." + name):
+                        style_engine.import_pack("invalid", card, self.authors)
+
     def test_sample_card_roundtrips_through_resolve_pack(self) -> None:
         result = style_engine.import_pack(
             "demo-style", self._card(SAMPLE_CARD), self.authors, display_name="作者甲式"

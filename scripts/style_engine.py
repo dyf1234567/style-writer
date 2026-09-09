@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -55,7 +56,9 @@ def resolve_pack(author: str, authors_root: str | Path | None = None) -> tuple[P
     if not pack_file.exists():
         raise FileNotFoundError(f"author pack not found: {pack_file}")
     pack = json.loads(pack_file.read_text(encoding="utf-8"))
-    if int(pack.get("schema_version", 0)) != SCHEMA_VERSION:
+    if not isinstance(pack, dict):
+        raise ValueError("pack root must be a mapping")
+    if type(pack.get("schema_version")) is not int or pack["schema_version"] != SCHEMA_VERSION:
         raise ValueError(f"unsupported pack schema: {pack.get('schema_version')}")
     if pack.get("slug") != author:
         raise ValueError(f"pack slug mismatch: expected {author!r}")
@@ -909,6 +912,8 @@ def _scalar(raw: str):
             raise ValueError("invalid YAML single-quoted scalar")
         return text[1:-1].replace("''", "'")
     lowered = text.lower()
+    if text in ("null", "Null", "NULL", "~"):
+        return None
     if lowered == "true":
         return True
     if lowered == "false":
@@ -922,6 +927,29 @@ def _scalar(raw: str):
     except ValueError:
         pass
     return text
+
+
+def _mapping_parts(text: str) -> tuple[str, str, str]:
+    """Find a mapping delimiter outside quoted strings; colon must end or precede whitespace."""
+    quote = None
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if quote:
+            if quote == '"' and char == "\\":
+                i += 2
+                continue
+            if char == quote:
+                if quote == "'" and text[i:i + 2] == "''":
+                    i += 2
+                    continue
+                quote = None
+        elif char in "\"'" and (i == 0 or text[i - 1].isspace()):
+            quote = char
+        elif char == ":" and (i + 1 == len(text) or text[i + 1].isspace()):
+            return text[:i], ":", text[i + 1:]
+        i += 1
+    return text, "", ""
 
 
 def _parse_restricted(text: str) -> dict:
@@ -950,7 +978,7 @@ def _parse_restricted(text: str) -> dict:
                 raise ValueError(f"line {no}: unexpected indentation")
             if content.startswith("- "):
                 raise ValueError(f"line {no}: list item in mapping context")
-            key, sep, rest = content.partition(":")
+            key, sep, rest = _mapping_parts(_strip_comment(content))
             if not sep:
                 raise ValueError(f"line {no}: expect \"key: value\"")
             key = key.strip()
@@ -977,14 +1005,14 @@ def _parse_restricted(text: str) -> dict:
                 break
             body = content[2:].strip()
             index += 1
-            if body[:1] in ("\"", "'") or ":" not in body:
+            key, sep, rest = _mapping_parts(_strip_comment(body))
+            if body[:1] in ("\"", "'") or not sep:
                 items.append(_scalar(body))
                 continue
-            key, _sep, rest = body.partition(":")
             item = {key.strip(): _scalar(rest)}
             while index < len(rows) and rows[index][1] > indent and not rows[index][2].startswith("- "):
                 c_no, _c, c_content = rows[index]
-                c_key, c_sep, c_rest = c_content.partition(":")
+                c_key, c_sep, c_rest = _mapping_parts(_strip_comment(c_content))
                 if not c_sep:
                     raise ValueError(f"line {c_no}: expect \"key: value\" inside list item")
                 item[c_key.strip()] = _scalar(c_rest)
@@ -1080,6 +1108,98 @@ def _read_corpus(explicit: str | Path | None, env_name: str) -> tuple[str | None
     return "".join(read_text(path) for path in files), None
 
 
+def _number(value, path: str) -> None:
+    if value is None or value == "":
+        return
+    if type(value) not in (int, float) or not math.isfinite(value):
+        raise ValueError(f"{path} 应为有限数值（不能是字符串或布尔值）")
+
+
+def _validate_card_types(card: dict) -> None:
+    for path in ("imagery.taboo", "imagery.semantic_domains", "syntax.lexical_fingerprint"):
+        values = _dig(card, path)
+        if values is None:
+            continue
+        if not isinstance(values, list):
+            raise ValueError(f"{path} 应为字符串列表")
+        for i, value in enumerate(values):
+            if not isinstance(value, str):
+                raise ValueError(f'{path}[{i}] 应为字符串；包含“冒号＋空格”的文本请加引号。')
+    paths = [
+        "voice.narrator_comment_ratio", "timeline.analepsis_ratio", "timeline.prolepsis_ratio",
+        "timeline.scene_time_ratio", "scene.description_ratio", "emotion_writing.emotion_words_per_1k",
+        "imagery.simile_markers_per_1k", "syntax.dialogue_char_ratio", "syntax.dialogue_blocks_per_1k",
+        "plotlines.count", "plotlines.convergence_every", "serial_rhythm.scenes_per_chapter",
+        "serial_rhythm.arc_length", "serial_rhythm.arc_recovery", "serial_rhythm.cliffhanger_frequency",
+        "reward_rhythm.payoff_interval",
+    ]
+    for parent, fields in (
+        ("serial_rhythm.words_per_chapter", ("median", "p10", "p90")),
+        ("syntax.sentence_len", ("median", "p90", "short_le10_ratio", "long_ge40_ratio")),
+        ("syntax.paragraph_len", ("median", "p90", "short_para_ratio")),
+        ("syntax.punct_per_1k", ("exclam", "question", "ellipsis", "dash")),
+    ):
+        container = _dig(card, parent)
+        if container is not None and not isinstance(container, dict):
+            raise ValueError(f"{parent} 应为映射")
+        paths.extend(f"{parent}.{field}" for field in fields)
+    for path in paths:
+        _number(_dig(card, path), path)
+    words = _dig(card, "scene.scene_words")
+    if words is not None:
+        if not isinstance(words, list) or len(words) not in (0, 2):
+            raise ValueError("scene.scene_words 应为两个数值组成的列表")
+        for i, value in enumerate(words):
+            _number(value, f"scene.scene_words[{i}]")
+    lines = _dig(card, "plotlines.lines")
+    if lines is not None:
+        if not isinstance(lines, list):
+            raise ValueError("plotlines.lines 应为映射列表")
+        for i, entry in enumerate(lines):
+            if not isinstance(entry, dict):
+                raise ValueError(f"plotlines.lines[{i}] 应为映射")
+            _number(entry.get("weight"), f"plotlines.lines[{i}].weight")
+
+
+def _atomic_pack_write(path: Path, pack: dict) -> None:
+    content = json.dumps(pack, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=".pack-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def _validate_retained_config(pack: dict) -> None:
+    for key in ("display_name", "default_family", "unmatched_family"):
+        if key in pack and not isinstance(pack[key], str):
+            raise ValueError(f"pack.{key} must be a string")
+    if "corpus" in pack:
+        corpus = pack["corpus"]
+        if not isinstance(corpus, dict) or not isinstance(corpus.get("env"), str):
+            raise ValueError("pack.corpus must contain a string env")
+    if "exclude_patterns" in pack:
+        patterns = pack["exclude_patterns"]
+        if not isinstance(patterns, list) or any(not isinstance(p, str) for p in patterns):
+            raise ValueError("pack.exclude_patterns must be a string list")
+    if "families" in pack:
+        families = pack["families"]
+        if not isinstance(families, list):
+            raise ValueError("pack.families must be a list")
+        for family in families:
+            if (not isinstance(family, dict) or not isinstance(family.get("id"), str)
+                    or not isinstance(family.get("patterns"), list)
+                    or any(not isinstance(p, str) for p in family["patterns"])):
+                raise ValueError("pack.families items require string id and string-list patterns")
+
+
 def import_pack(
     author: str,
     card_path: str | Path,
@@ -1089,6 +1209,7 @@ def import_pack(
     force: bool = False,
     corpus_root: str | Path | None = None,
     overlap_run: int = 10,
+    discard_existing_config: bool = False,
 ) -> dict:
     """style-card.yaml → pack.json 桥接（识别侧产物进入执行侧的唯一通道）。
 
@@ -1102,20 +1223,35 @@ def import_pack(
         raise ValueError(f"invalid slug: {author}（用小写字母/数字/-/_）")
     if overlap_run <= 0:
         raise ValueError("overlap_run must be positive")
+    if discard_existing_config and not force:
+        raise ValueError("--discard-existing-config 必须与 --force 同时使用")
     root = Path(authors_root).expanduser() if authors_root else _default_author_root()
     pack_dir = root / author
     pack_file = pack_dir / "pack.json"
     existing = {}
+    warnings: list[str] = []
     if pack_file.exists():
         if not force:
             raise FileExistsError(f"pack exists: {pack_file}（--force 覆盖）")
-        _, existing = resolve_pack(author, root)
+        if discard_existing_config:
+            warnings.append("已放弃旧配置：display_name、corpus（语料环境变量）、families、"
+                            "default_family、unmatched_family、exclude_patterns 将恢复导入默认值；"
+                            "显式 --display-name / --corpus-env 仍优先。")
+        else:
+            try:
+                _, existing = resolve_pack(author, root)
+                _validate_retained_config(existing)
+            except (ValueError, UnicodeError) as exc:
+                raise ValueError("旧作者包无法读取或格式不兼容，未覆盖。请修复 pack.json；"
+                                 "确认放弃旧配置时使用 --force --discard-existing-config。"
+                                 f"原因：{exc}") from exc
     card_file = Path(card_path).expanduser()
     if not card_file.exists():
         raise FileNotFoundError(f"style card not found: {card_file}")
     card = _parse_restricted(read_text(card_file))
     if not isinstance(card, dict) or not card:
         raise ValueError("style card is empty or not a mapping")
+    _validate_card_types(card)
 
     traits: list[str] = []
     controls: list[str] = []
@@ -1151,7 +1287,9 @@ def import_pack(
 
     wc = _dig(card, "serial_rhythm.words_per_chapter")
     if isinstance(wc, dict) and _filled(wc.get("median")):
-        traits.append(f"章字数：中位 {wc['median']}（p10 {wc.get('p10', '-')} / p90 {wc.get('p90', '-')}）")
+        p10 = wc.get('p10') if _filled(wc.get('p10')) else '-'
+        p90 = wc.get('p90') if _filled(wc.get('p90')) else '-'
+        traits.append(f"章字数：中位 {wc['median']}（p10 {p10} / p90 {p90}）")
     sl = _dig(card, "syntax.sentence_len")
     if isinstance(sl, dict):
         bits = [f"中位 {sl['median']}" for _ in [0] if _filled(sl.get("median"))]
@@ -1211,7 +1349,7 @@ def import_pack(
         if _filled(value):
             controls.append(text.format(v=value))
     scene_words = _dig(card, "scene.scene_words")
-    if isinstance(scene_words, list) and len(scene_words) == 2 and any(_filled(w) for w in scene_words):
+    if isinstance(scene_words, list) and len(scene_words) == 2 and all(w is not None and w != "" for w in scene_words) and any(_filled(w) for w in scene_words):
         controls.append(f"单场景字数区间：{scene_words[0]}-{scene_words[1]}")
 
     negatives = ["禁止复刻原作语句、人名、地名与具体情节"]
@@ -1257,7 +1395,6 @@ def import_pack(
                 f"红线：字段 {path} 含弯引号/直角引号 {marks}，疑似原文摘录，回卡内改写成抽象描述"
             )
 
-    warnings: list[str] = []
     redline: dict = {
         "target_work": "checked",
         "quote_marks": "checked",
@@ -1286,7 +1423,7 @@ def import_pack(
             )
 
     pack_dir.mkdir(parents=True, exist_ok=True)
-    pack_file.write_text(json.dumps(pack, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _atomic_pack_write(pack_file, pack)
     return {
         "ok": True,
         "author": author,
@@ -1347,6 +1484,8 @@ def _parser() -> argparse.ArgumentParser:
     p_import.add_argument("--overlap-run", type=int, default=10,
                           help="与语料连续汉字重合多少字判为原句泄漏（默认 10）")
     p_import.add_argument("--force", action="store_true", help="overwrite existing pack.json")
+    p_import.add_argument("--discard-existing-config", action="store_true",
+                          help="requires --force; explicitly reset existing runtime configuration")
     return parser
 
 

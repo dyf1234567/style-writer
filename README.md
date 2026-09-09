@@ -1,5 +1,13 @@
 # style-writer
 
+一个可移植的中文写作风格 Skill：从参考作品中提炼抽象风格卡，创建作者包，
+并通过 SQLite FTS5 与可选的本地 Ollama 向量检索提供场景写作参考。
+支持静态包、作品分组和连续原文重合审计。目标是高层特征启发，不是一比一复刻或冒充作者；
+当前项目的人物、设定、事实和既有声音始终优先。
+
+- `analysis/`：风格识别，量化与精读后生成 `style-card.yaml`。
+- `scripts/style_engine.py`：通过 `import-pack` 导入作者包，构建索引、检索风格上下文和审计重合。
+
 ## 一句话创建作者包和索引
 
 在 Codex 中发送以下请求，替换其中的占位符；不要直接在终端执行：
@@ -23,25 +31,6 @@ $style-writer 为已有作者包“<作者标识>”建立混合索引。作者�
 索引按作者标识保存为 `<索引根目录>/<作者标识>.sqlite3`，同一作者可供多个新小说项目复用。
 新小说正文不会自动加入作者语料库；新增另一作者才需要单独建库。
 当前 `build` 为全量重建，没有内置增量缓存或断点续建；`prepare` 不会自动建库。
-
-## 本次升级注意事项
-
-- 升级后重新运行 `build`，补齐旧索引遗漏的短文和末尾片段。
-- `import-pack --force` 保留已有语料、作品分组和排除规则；显式参数可以覆盖显示名和语料环境变量。
-- 重合审计只有每个片段都有候选且无警告时才返回 `clean`；这不是全语料穷举或原创性证明。
-- 空语料或汉字不足时，导入结果明确标记原文比对未执行。向量维度不匹配时会报告降级原因。
-- YAML 引号与列表支持范围见 [作者包约定](references/pack-contract.md)，索引与审计流程见 [工作流](references/workflows.md)。
-
-A portable Codex skill for building and applying author-inspired Chinese prose style packs. It supports static profiles, SQLite FTS5 retrieval, optional local embeddings through Ollama, work-family routing, and source-overlap auditing.
-
-The workflow is designed for high-level inspiration rather than exact impersonation. Project characters, canon, facts, and voice take priority over every style pack.
-
-The repository spans both sides of the style pipeline:
-
-- `analysis/` — style **recognition**: read a reference work and converge it into an abstract `style-card.yaml` (11-section report incl. emotion writing & reward rhythm + `measure.py` quantification with v4 lexeme stats; formerly the standalone novel-style-kit project). Method only — never plot, names, or prose.
-- `scripts/style_engine.py` — style **execution**: index a corpus, retrieve per-scene writing context, audit drafts for source overlap.
-
-`import-pack` is the bridge between them: a filled style card becomes a runtime `pack.json`. See [From card to pack](#from-card-to-pack).
 
 ## Install
 
@@ -111,7 +100,32 @@ The bridge enforces red lines programmatically:
 
 Cards use a restricted YAML subset (mappings, scalars, lists, inline comments — no multiline scalars or anchors), parsed without third-party dependencies.
 
+未加引号的 `null`、`Null`、`NULL`、`~` 解析为空值并跳过；带引号的 `"null"` 是字符串，
+不能用于数值字段。数值字段拒绝布尔值和非有限数。字符串列表内含冒号加空格时请加引号，
+例如 `"避免: 连续感叹号"`；映射或数值不能自动转换为约束文本。
+
+### 损坏作者包恢复
+
+`--force` 保留旧配置，旧包损坏或 slug/schema 不符时会停止并给出提示。
+优先修复原 JSON。只有确认放弃旧运行配置时才执行：
+
+```powershell
+python scripts/style_engine.py import-pack --author example-style --card style-card.yaml --force --discard-existing-config
+```
+
+恢复参数必须与 `--force` 同现；会重置显示名、语料环境变量、作品分组、默认/未匹配分组和排除规则，
+显式显示名或语料环境变量参数仍优先。卡片和红线检查通过后才写同目录临时文件并原子替换旧包。
+检查失败或写入/替换失败时保留旧文件；权限问题不会被当成可忽略的损坏配置。
+
 After importing, `status`, `build`, `prepare`, and `audit-overlap` work on the new author as usual. Packs created by the bridge carry no `families`; add them manually to `pack.json` if the corpus has subdirectories worth routing.
+
+## 迁移说明
+
+- 仅当索引仍由 `ddac4fe` 之前的分块代码生成时，建议重新 `build` 以补齐可能遗漏的短文和尾部片段。
+  已使用新版重建的索引，无需因本次导入修复或文档更新再次重建。
+- `import-pack --force` 保留旧运行配置；不要把 `--discard-existing-config` 当成常规更新参数。
+- 当前没有自动检测索引分块器版本的功能。索引流程见 [工作流](references/workflows.md)，
+  YAML 支持范围与作者包约定见 [作者包约定](references/pack-contract.md)。
 
 ## Data and rights
 
