@@ -49,3 +49,12 @@ python scripts/style_engine.py audit-overlap --author jiangnan --input path/to/c
 ```
 
 A warning is a review queue, not proof of copying. Rewrite flagged wording while preserving scene facts.
+
+只有每个 probe 都取到候选且没有重合警告，才返回 `clean`。部分或全部
+probe 无候选时 `ok: false`、`requires_manual_review: true`；没有重合警告
+则为 `inconclusive`，已有警告则仍为 `review`。`clean` 仅描述候选比对结果，
+不是全语料穷举或原创性证明。
+
+升级后请重新运行 `build`：新版分块会保留短文及不足最小目标长度的末尾片段，
+旧索引不会自动补齐。向量批次数量或维度异常会阻止构建；查询维度与索引不符
+会通过 `vector_error` 说明原因并降级到词法检索，需使用同一个模型重建索引。

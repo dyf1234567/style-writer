@@ -101,27 +101,39 @@ def normalize_text(text: str) -> str:
 
 
 def iter_chunks(text: str, target: int = 900, maximum: int = 1400, minimum: int = 120) -> Iterator[str]:
+    if not 0 < minimum <= target <= maximum:
+        raise ValueError("chunk sizes must satisfy 0 < minimum <= target <= maximum")
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     if len(paragraphs) <= 1:
         paragraphs = [p.strip() for p in text.splitlines() if p.strip()]
     buf = ""
+    pending = ""
     for para in paragraphs:
         if len(para) > maximum:
             parts = [p for p in re.split(r"(?<=[。！？!?])", para) if p]
         else:
             parts = [para]
+        parts = [piece[i:i + maximum] for piece in parts for i in range(0, len(piece), maximum)]
         for part in parts:
             candidate = f"{buf}\n{part}".strip() if buf else part
             if buf and len(candidate) > maximum:
-                if len(buf) >= minimum:
-                    yield buf
+                if pending:
+                    yield pending
+                pending = buf
                 buf = part
             else:
                 buf = candidate
             if len(buf) >= target:
-                yield buf
+                if pending:
+                    yield pending
+                pending = buf
                 buf = ""
-    if len(buf) >= minimum:
+    if pending and buf and len(buf) < minimum and len(pending) + 1 + len(buf) <= maximum:
+        yield pending + "\n" + buf
+        return
+    if pending:
+        yield pending
+    if buf:
         yield buf
 
 
@@ -231,6 +243,8 @@ def _unpack_vector(blob: bytes) -> array.array:
 
 
 def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    if not len(a) or len(a) != len(b):
+        raise ValueError("embedding dimensions differ or are empty; rebuild the index")
     return sum(x * y for x, y in zip(a, b))
 
 
@@ -320,8 +334,12 @@ def build_index(
             for start in range(0, total, max(1, batch_size)):
                 batch = selected[start : start + max(1, batch_size)]
                 vectors = embed_texts([text for _, text in batch], provider, model, endpoint)
+                if len(vectors) != len(batch):
+                    raise ValueError("embedding count differs from input count")
                 if vectors:
-                    vector_dim = len(vectors[0])
+                    vector_dim = vector_dim or len(vectors[0])
+                    if not vector_dim or any(len(vec) != vector_dim for vec in vectors):
+                        raise ValueError("embedding dimensions changed during build; rebuild with one model")
                 conn.executemany(
                     "INSERT INTO vectors(passage_id,dim,embedding) VALUES(?,?,?)",
                     ((pid, len(vec), _pack_vector(vec)) for (pid, _), vec in zip(batch, vectors)),
@@ -492,6 +510,8 @@ def query_index(
     if provider != "none":
         try:
             qvec = embed_texts([query], provider, str(meta.get("model", DEFAULT_MODEL)), endpoint)[0]
+            if not qvec or len(qvec) != int(meta.get("vector_dim", 0)):
+                raise ValueError("query embedding dimension differs from index; rebuild the index")
             vector_rows = conn.execute(
                 f"""SELECT p.*,v.embedding FROM vectors v JOIN passages p ON p.id=v.passage_id
                     WHERE {where}""",
@@ -700,7 +720,7 @@ def audit_overlap(
             "verdict": "error",
             "input": str(Path(input_path)),
             "probes": 0,
-            "error": "输入没有可比较的片段（空文件，或短于一个 probe）",
+            "error": "输入没有可比较的片段（空文件或全空白）",
             "warnings": [],
         }
     warnings = []
@@ -743,8 +763,8 @@ def audit_overlap(
                     "generated_excerpt": probe[:160],
                 })
                 break
-    # 一个候选都没捞到 = 这次运行没有真正比对过任何文本，不能读成「干净」。
-    inconclusive = probes_with_candidates == 0
+    # 任一 probe 未取到候选都意味着覆盖不完整，不能读成「干净」。
+    inconclusive = probes_with_candidates < len(probes)
     verdict = "review" if warnings else ("inconclusive" if inconclusive else "clean")
     return {
         "ok": not inconclusive,
@@ -754,12 +774,12 @@ def audit_overlap(
         "probes_with_candidates": probes_with_candidates,
         "passages_in_scope": scope,
         "warnings": warnings,
-        "requires_manual_review": bool(warnings),
+        "requires_manual_review": bool(warnings) or inconclusive,
         "coverage": f"{probes_with_candidates}/{len(probes)} 个 probe 取到候选文本",
         "note": (
             "只检测连续重合（默认 ≥24 字）：改词换序式抄写不在检测范围内；"
-            "clean 只表示相对已索引语料无连续重合"
-            + ("；inconclusive = 检索没有取回任何候选，本次运行不构成结论，请检查 build/family"
+            "clean 只表示每个 probe 都有候选，且这些候选内没有达到阈值的重合；并非全语料穷举"
+            + ("；存在未取到候选的 probe，本次覆盖不完整，请检查 build/family"
                if inconclusive else "")
         ),
     }
@@ -813,16 +833,59 @@ CARD_CONTROL_LABELS = {
 
 
 def _strip_comment(raw: str) -> str:
-    """去掉行内注释；带引号的值只认闭合引号后的注释。"""
+    """只移除引号外的注释，保留转义与内联列表中的内容。"""
     text = raw.strip()
-    if text.startswith("#"):
-        return ""
-    if text[:1] in ("\"", "'"):
-        quote = text[0]
-        end = text.find(quote, 1)
-        return text[: end + 1] if end != -1 else text
-    cut = text.find(" #")
-    return text[:cut].strip() if cut != -1 else text
+    quote = None
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if quote == '"' and c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                if quote == "'" and text[i:i + 2] == "''":
+                    i += 2
+                    continue
+                quote = None
+        elif c in "\"'" and (i == 0 or text[i - 1] in " [,:"):
+            quote = c
+        elif c == "#" and (i == 0 or text[i - 1].isspace()):
+            return text[:i].rstrip()
+        i += 1
+    if quote:
+        raise ValueError("unclosed YAML quote")
+    return text
+
+
+def _inline_items(inner: str) -> list[str]:
+    items, start, i, quote = [], 0, 0, None
+    while i < len(inner):
+        c = inner[i]
+        if quote:
+            if quote == '"' and c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                if quote == "'" and inner[i:i + 2] == "''":
+                    i += 2
+                    continue
+                quote = None
+        elif c in "\"'" and not inner[start:i].strip():
+            quote = c
+        elif c in "[]{}":
+            raise ValueError("nested YAML flow collections are not supported")
+        elif c == ",":
+            if not inner[start:i].strip():
+                raise ValueError("empty YAML inline item")
+            items.append(inner[start:i].strip())
+            start = i + 1
+        i += 1
+    if quote:
+        raise ValueError("unclosed YAML quote")
+    if inner[start:].strip():
+        items.append(inner[start:].strip())
+    return items
 
 
 def _scalar(raw: str):
@@ -833,9 +896,18 @@ def _scalar(raw: str):
         return []
     if text[:1] == "[" and text[-1:] == "]":
         inner = text[1:-1].strip()
-        return [] if not inner else [_scalar(part.strip()) for part in inner.split(",")]
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("\"", "'"):
-        return text[1:-1]
+        return [] if not inner else [_scalar(part) for part in _inline_items(inner)]
+    if text.startswith("[") or text.startswith("{"):
+        raise ValueError("invalid or unsupported YAML flow collection")
+    if text.startswith('"'):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("invalid YAML double-quoted scalar (use JSON escapes)") from exc
+    if text.startswith("'"):
+        if not re.fullmatch(r"'(?:[^']|'')*'", text):
+            raise ValueError("invalid YAML single-quoted scalar")
+        return text[1:-1].replace("''", "'")
     lowered = text.lower()
     if lowered == "true":
         return True
@@ -1028,6 +1100,16 @@ def import_pack(
     """
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", author):
         raise ValueError(f"invalid slug: {author}（用小写字母/数字/-/_）")
+    if overlap_run <= 0:
+        raise ValueError("overlap_run must be positive")
+    root = Path(authors_root).expanduser() if authors_root else _default_author_root()
+    pack_dir = root / author
+    pack_file = pack_dir / "pack.json"
+    existing = {}
+    if pack_file.exists():
+        if not force:
+            raise FileExistsError(f"pack exists: {pack_file}（--force 覆盖）")
+        _, existing = resolve_pack(author, root)
     card_file = Path(card_path).expanduser()
     if not card_file.exists():
         raise FileNotFoundError(f"style card not found: {card_file}")
@@ -1156,6 +1238,14 @@ def import_pack(
         "negative_constraints": negatives,
     }
 
+    for key in ("display_name", "corpus", "families", "default_family", "unmatched_family", "exclude_patterns"):
+        if key in existing:
+            pack[key] = existing[key]
+    if display_name is not None:
+        pack["display_name"] = display_name
+    if corpus_env is not None:
+        pack["corpus"] = {**pack["corpus"], "env": corpus_env}
+
     target_work = str(_dig(card, "meta.target_work") or "").strip()
     if target_work and target_work in json.dumps(pack, ensure_ascii=False):
         raise ValueError(f"红线：meta.target_work「{target_work}」泄漏进了卡片字段，先回卡内清除")
@@ -1174,6 +1264,9 @@ def import_pack(
         "source_overlap": {"status": "skipped"},
     }
     corpus_text, corpus_note = _read_corpus(corpus_root, str(pack["corpus"].get("env", "")))
+    if corpus_text is not None and len(_cn_only(corpus_text)) < overlap_run:
+        corpus_note = f"可比对汉字不足 {overlap_run} 字（实际 {len(_cn_only(corpus_text))} 字）"
+        corpus_text = None
     if corpus_text is None:
         redline["source_overlap"] = {"status": "skipped", "reason": corpus_note}
         warnings.append(
@@ -1192,11 +1285,6 @@ def import_pack(
                 "命中原文不打印，请回卡内改写这些字段"
             )
 
-    root = Path(authors_root).expanduser() if authors_root else _default_author_root()
-    pack_dir = root / author
-    pack_file = pack_dir / "pack.json"
-    if pack_file.exists() and not force:
-        raise FileExistsError(f"pack exists: {pack_file}（--force 覆盖）")
     pack_dir.mkdir(parents=True, exist_ok=True)
     pack_file.write_text(json.dumps(pack, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {

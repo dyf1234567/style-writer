@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -200,6 +201,54 @@ class ImportPackTests(unittest.TestCase):
             style_engine.import_pack("twice", card, self.authors)
         result = style_engine.import_pack("twice", card, self.authors, force=True)
         self.assertTrue(result["ok"])
+
+    def test_force_preserves_runtime_config_and_uses_existing_corpus_env(self) -> None:
+        card = self._card(SAMPLE_CARD)
+        style_engine.import_pack("keep", card, self.authors)
+        directory, pack = style_engine.resolve_pack("keep", self.authors)
+        config = {"display_name": "自定义", "corpus": {"env": "CUSTOM_CORPUS"},
+                  "families": [{"id": "modern", "patterns": ["现代"]}],
+                  "default_family": "modern", "unmatched_family": "unknown",
+                  "exclude_patterns": ["私稿"]}
+        pack.update(config)
+        (directory / "pack.json").write_text(json.dumps(pack), encoding="utf-8")
+        with patch.object(style_engine, "_read_corpus", return_value=(None, "测试无语料")) as reader:
+            style_engine.import_pack("keep", card, self.authors, force=True)
+        reader.assert_called_once_with(None, "CUSTOM_CORPUS")
+        _, updated = style_engine.resolve_pack("keep", self.authors)
+        self.assertEqual({key: updated[key] for key in config}, config)
+        style_engine.import_pack("keep", card, self.authors, force=True,
+                                 display_name="改名", corpus_env="OTHER_CORPUS")
+        _, updated = style_engine.resolve_pack("keep", self.authors)
+        self.assertEqual(updated["display_name"], "改名")
+        self.assertEqual(updated["corpus"]["env"], "OTHER_CORPUS")
+
+    def test_empty_or_too_short_corpus_is_skipped(self) -> None:
+        corpus = self.root / "empty.txt"
+        for text in ("", "ASCII only", "短文"):
+            corpus.write_text(text, encoding="utf-8")
+            result = style_engine.import_pack("empty", self._card(SAMPLE_CARD), self.authors,
+                                             corpus_root=corpus, force=True)
+            self.assertEqual(result["redline"]["source_overlap"]["status"], "skipped")
+            self.assertTrue(result["warnings"])
+        with self.assertRaises(ValueError):
+            style_engine.import_pack("bad", self._card(SAMPLE_CARD), self.authors, overlap_run=0)
+
+    def test_yaml_inline_quotes_are_preserved(self) -> None:
+        text = '''imagery:
+  semantic_domains: ["天气, 器物", "身体 # 动作", 'it''s quiet'] # 注释
+voice:
+  person: "他说\\\"你好\\\"" # 注释
+'''
+        card = style_engine._parse_restricted(text)
+        self.assertEqual(card["imagery"]["semantic_domains"], ["天气, 器物", "身体 # 动作", "it's quiet"])
+        self.assertEqual(card["voice"]["person"], '他说"你好"')
+
+    def test_yaml_invalid_quotes_fail_explicitly(self) -> None:
+        for value in ('["未闭合]', '"完整" 垃圾', "'未闭合", '[a,,b]', '[a, [b]]', '[a, b'):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    style_engine._parse_restricted("field: " + value)
 
     def test_invalid_slug_rejected(self) -> None:
         with self.assertRaises(ValueError):

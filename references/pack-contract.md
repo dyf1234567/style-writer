@@ -37,6 +37,16 @@ the default writing family.
 
 ## External roots
 
+重新导入：`import-pack --force` 更新卡片派生的风格字段，但保留已有
+`display_name`、`corpus`、`families`、`default_family`、`unmatched_family` 和
+`exclude_patterns`。显式 `--display-name` / `--corpus-env` 优先于旧配置。
+原文比对使用保留或显式覆盖后的语料环境变量；语料为空或汉字数不足
+`--overlap-run` 时返回 `source_overlap.status: skipped` 和警告，不算已检查。
+
+卡片 YAML 是受限子集。内联列表支持引号内逗号和井号；单引号用 `''`
+表示引号，双引号支持 JSON 转义。未闭合引号、引号后垃圾、嵌套流式集合
+会报错，不应按完整 YAML 规范假定支持。
+
 - `AUTHOR_STYLE_HOME`: author pack root; each pack is a child directory.
 - `STYLE_INDEX_HOME`: SQLite index root.
 - `STYLE_VECTOR_OLLAMA_URL`: optional Ollama endpoint; defaults to `http://127.0.0.1:11434`.

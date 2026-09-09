@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -69,6 +70,40 @@ class StyleEngineTests(unittest.TestCase):
         self.assertEqual(result["skipped_lore_files"], 1)
         self.assertGreater(result["passages"], 0)
         self.assertEqual(result["provider"], "none")
+
+    def test_chunks_preserve_short_documents_and_tails(self) -> None:
+        for source in ("短文", "甲" * 900 + "\n\n" + "乙" * 50, "甲" * 2900):
+            with self.subTest(length=len(source)):
+                chunks = list(style_engine.iter_chunks(source))
+                self.assertEqual("".join(chunks).replace("\n", ""), source.replace("\n", ""))
+                self.assertTrue(all(len(chunk) <= 1400 for chunk in chunks))
+
+    def test_partial_audit_is_not_clean(self) -> None:
+        self.build("none")
+        draft = self.root / "partial.md"
+        draft.write_text("雨夜" + "甲" * 258 + "\n\n" + "龘" * 260, encoding="utf-8")
+        result = style_engine.audit_overlap("demo", draft, self.authors, self.indexes)
+        self.assertEqual(result["probes"], 2)
+        self.assertEqual(result["probes_with_candidates"], 1)
+        self.assertEqual(result["verdict"], "inconclusive")
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["requires_manual_review"])
+
+    def test_query_dimension_mismatch_reports_fallback(self) -> None:
+        self.build("hash")
+        with patch.object(style_engine, "embed_texts", return_value=[[1.0, 0.0]]):
+            result = style_engine.query_index("demo", "雨夜", self.authors, self.indexes)
+        self.assertIn("dimension", result["vector_error"])
+        self.assertEqual(result["mode"], "fts5")
+        with self.assertRaises(ValueError):
+            style_engine._dot([1.0], [1.0, 0.0])
+
+    def test_build_rejects_bad_embedding_batches(self) -> None:
+        for vectors in ([], [[1.0], [1.0, 0.0]], [[], []]):
+            with self.subTest(vectors=vectors):
+                with patch.object(style_engine, "embed_texts", return_value=vectors):
+                    with self.assertRaises(ValueError):
+                        self.build("hash")
 
     def test_parent_directory_wins_over_title_keyword(self) -> None:
         _, pack = style_engine.resolve_pack("demo", self.authors)
@@ -237,7 +272,7 @@ class StyleEngineTests(unittest.TestCase):
             encoding="utf-8",
         )
         result = style_engine.audit_overlap("demo", draft, self.authors, self.indexes, family="modern")
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])  # 有重合仍需审查，且首个 probe 未覆盖。
         self.assertEqual(result["verdict"], "review")
         self.assertGreater(result["probes_with_candidates"], 0)
 
@@ -245,12 +280,12 @@ class StyleEngineTests(unittest.TestCase):
         """取到候选但连续重合不够长 -> clean；与「一个候选都没取到」区分开。"""
         self.build("none")
         draft = self.root / "odd3.txt"
-        draft.write_text(NO_OVERLAP_TEXT + "\n\n" + "雨夜里的少年" + "鑫" * 250, encoding="utf-8")
+        draft.write_text("雨夜里的少年" + "鑫" * 250, encoding="utf-8")
         result = style_engine.audit_overlap("demo", draft, self.authors, self.indexes, family="modern")
         self.assertTrue(result["ok"])
         self.assertEqual(result["verdict"], "clean")
         self.assertEqual(result["warnings"], [])
-        self.assertGreater(result["probes_with_candidates"], 0)
+        self.assertEqual(result["probes_with_candidates"], result["probes"])
 
     def test_prepare_keeps_static_label_but_says_why(self) -> None:
         result = style_engine.prepare_context("demo", "雨夜 少年", self.authors, self.indexes, family="modern")

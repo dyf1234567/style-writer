@@ -1,5 +1,13 @@
 # style-writer
 
+## 本次升级注意事项
+
+- 升级后重新运行 `build`，补齐旧索引遗漏的短文和末尾片段。
+- `import-pack --force` 保留已有语料、作品分组和排除规则；显式参数可以覆盖显示名和语料环境变量。
+- 重合审计只有每个片段都有候选且无警告时才返回 `clean`；这不是全语料穷举或原创性证明。
+- 空语料或汉字不足时，导入结果明确标记原文比对未执行。向量维度不匹配时会报告降级原因。
+- YAML 引号与列表支持范围见 [作者包约定](references/pack-contract.md)，索引与审计流程见 [工作流](references/workflows.md)。
+
 A portable Codex skill for building and applying author-inspired Chinese prose style packs. It supports static profiles, SQLite FTS5 retrieval, optional local embeddings through Ollama, work-family routing, and source-overlap auditing.
 
 The workflow is designed for high-level inspiration rather than exact impersonation. Project characters, canon, facts, and voice take priority over every style pack.
