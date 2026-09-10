@@ -61,7 +61,7 @@ def resolve_pack(author: str, authors_root: str | Path | None = None) -> tuple[P
     if not isinstance(pack, dict):
         raise ValueError("pack root must be a mapping")
     if type(pack.get("schema_version")) is not int or pack["schema_version"] != SCHEMA_VERSION:
-        raise ValueError(f"unsupported pack schema: {pack.get('schema_version')}")
+        raise ValueError(f"unsupported pack schema: {pack.get('schema_version')!r}")
     if pack.get("slug") != author:
         raise ValueError(f"pack slug mismatch: expected {author!r}")
     return pack_dir, pack
@@ -1156,8 +1156,13 @@ def _explicit_null_paths(value, path: str = "") -> list[str]:
                 for found in _explicit_null_paths(child, f"{path}.{key}" if path else str(key))]
     if isinstance(value, list):
         return [found for i, child in enumerate(value)
-                for found in _explicit_null_paths(child, f"{path}[{i}]" )]
+                for found in _explicit_null_paths(child, f"{path}[{i}]")]
     return []
+
+
+def _text(value, path: str) -> None:
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{path} 应为字符串或 null，实际为 {type(value).__name__}")
 
 
 def _number(value, path: str) -> None:
@@ -1168,6 +1173,8 @@ def _number(value, path: str) -> None:
 
 
 def _validate_card_types(card: dict) -> None:
+    for path in (*CARD_TRAIT_LABELS, *CARD_CONTROL_LABELS):
+        _text(_dig(card, path), path)
     for path in ("imagery.taboo", "imagery.semantic_domains", "syntax.lexical_fingerprint"):
         values = _dig(card, path)
         if values is None:
@@ -1401,8 +1408,13 @@ def import_pack(
         if _filled(value):
             controls.append(text.format(v=value))
     scene_words = _dig(card, "scene.scene_words")
-    if isinstance(scene_words, list) and len(scene_words) == 2 and all(w is not None and w != "" for w in scene_words) and any(_filled(w) for w in scene_words):
-        controls.append(f"单场景字数区间：{scene_words[0]}-{scene_words[1]}")
+    if isinstance(scene_words, list) and len(scene_words) == 2:
+        present = [w is not None and w != "" for w in scene_words]
+        if sum(present) == 1:
+            missing = present.index(False)
+            warnings.append(f"scene.scene_words[{missing}] 未填写：区间只填一个边界，未采用该区间；请补齐两端。")
+        elif all(present) and any(_filled(w) for w in scene_words):
+            controls.append(f"单场景字数区间：{scene_words[0]}-{scene_words[1]}")
 
     negatives = ["禁止复刻原作语句、人名、地名与具体情节"]
     taboo = _dig(card, "imagery.taboo")

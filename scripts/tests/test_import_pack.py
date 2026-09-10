@@ -125,6 +125,54 @@ reward_rhythm:
 
 
 class ImportPackTests(unittest.TestCase):
+    def test_all_labeled_text_fields_reject_non_strings(self) -> None:
+        for path in (*style_engine.CARD_TRAIT_LABELS, *style_engine.CARD_CONTROL_LABELS):
+            section, key = path.split(".")
+            for value in (123, False, ["触觉", "听觉"], {"key": "value"}):
+                with self.subTest(path=path, value=value):
+                    with self.assertRaises(ValueError) as caught:
+                        style_engine._validate_card_types({section: {key: value}})
+                    self.assertIn(path, str(caught.exception))
+            for value in (None, "", "克制表达"):
+                style_engine._validate_card_types({section: {key: value}})
+
+    def test_invalid_text_import_does_not_overwrite(self) -> None:
+        style_engine.import_pack("demo", self._card(SAMPLE_CARD), self.authors)
+        target = self.authors / "demo" / "pack.json"
+        before = target.read_bytes()
+        for body in ("voice:\n  person: 123\nscene:\n  sensory_mix: 触觉优先",
+                     "voice:\n  person: 第三人称\nscene:\n  sensory_mix:\n    - 触觉\n    - 听觉"):
+            with self.assertRaises(ValueError):
+                style_engine.import_pack("demo", self._card(body), self.authors, force=True)
+            self.assertEqual(target.read_bytes(), before)
+
+    def test_partial_scene_range_reports_missing_boundary(self) -> None:
+        for values, warning_index in (([800, ""], 1), (["", 1800], 0), ([800, None], 1),
+                                      ([None, 1800], 0), ([0, ""], 1),
+                                      ([800, 1800], None), ([0, 0], None), (["", ""], None),
+                                      ([None, None], None)):
+            with self.subTest(values=values):
+                body = "voice:\n  person: 第三人称\nscene:\n  scene_words: " + json.dumps(values)
+                result = style_engine.import_pack("ranges", self._card(body), self.authors, force=True)
+                range_warnings = [w for w in result["warnings"] if "scene.scene_words[" in w]
+                _, pack = style_engine.resolve_pack("ranges", self.authors)
+                if warning_index is not None:
+                    self.assertEqual(len(range_warnings), 1)
+                    self.assertIn(f"[{warning_index}]", range_warnings[0])
+                    self.assertFalse(any("单场景字数区间" in t for t in pack["scene_controls"]))
+                else:
+                    self.assertFalse(range_warnings)
+                expected_nulls = [f"scene.scene_words[{i}]" for i, v in enumerate(values) if v is None]
+                self.assertEqual(result["explicit_null_fields"], expected_nulls)
+                if values == [800, 1800]:
+                    self.assertIn("单场景字数区间：800-1800", pack["scene_controls"])
+
+    def test_schema_error_shows_string_quotes(self) -> None:
+        with patch.object(Path, "exists", return_value=True), patch.object(
+                Path, "read_text", return_value='{"schema_version":"1","slug":"demo"}'):
+            with self.assertRaisesRegex(ValueError, "unsupported pack schema: '1'"):
+                style_engine.resolve_pack("demo", self.authors)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
