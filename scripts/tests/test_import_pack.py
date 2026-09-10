@@ -242,6 +242,35 @@ class ImportPackTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "scene.description_ratio"):
                     style_engine.import_pack("invalid", card, self.authors)
 
+    def test_explicit_null_paths_refresh_without_entering_prompt(self) -> None:
+        card = self._card('''voice:
+  person: 第三人称
+  distance: "null"
+scene:
+  description_ratio: null
+plotlines:
+  lines:
+    - id: A
+      weight: ~
+meta:
+  sample_words: NULL
+''')
+        expected = ["meta.sample_words", "plotlines.lines[0].weight", "scene.description_ratio"]
+        result = style_engine.import_pack("nullable", card, self.authors)
+        _, pack = style_engine.resolve_pack("nullable", self.authors)
+        self.assertEqual(result["explicit_null_fields"], expected)
+        self.assertEqual(pack["explicit_null_fields"], expected)
+        status = style_engine.status("nullable", self.authors, self.root / "indexes")
+        context = style_engine.prepare_context("nullable", "场景", self.authors, self.root / "indexes")
+        self.assertEqual(status["explicit_null_fields"], expected)
+        self.assertEqual(context["explicit_null_fields"], expected)
+        self.assertNotIn("explicit_null_fields", context["writing_context"])
+        self.assertNotIn("scene.description_ratio", json.dumps(context["writing_context"]))
+        result = style_engine.import_pack("nullable", self._card(SAMPLE_CARD), self.authors, force=True)
+        self.assertEqual(result["explicit_null_fields"], [])
+        _, updated = style_engine.resolve_pack("nullable", self.authors)
+        self.assertEqual(updated["explicit_null_fields"], [])
+
     def test_colon_rules_and_mapping_contexts(self) -> None:
         for literal, expected in (("避免:连续感叹号", "避免:连续感叹号"),
                                   ('"避免: 连续感叹号"', "避免: 连续感叹号"),

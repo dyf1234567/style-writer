@@ -30,4 +30,6 @@ Use author packs as reusable writing references, not as claims of authorship or 
 
 Use only the output under `writing_context` from `prepare`. Apply its high-level traits, retrieval metrics, scene controls, and negative constraints. The default context contains no source prose.
 
+Inspect top-level `warnings` and `index_compatibility` before reporting retrieval readiness; an unknown chunker version is uncertainty, not proof of missing passages. Explain actionable warnings without automatically rebuilding. `explicit_null_fields` is provenance metadata for empty card fields, not writing instructions or proof of measurement failure.
+
 When a project voice or character persona conflicts with an author pack, the project wins.

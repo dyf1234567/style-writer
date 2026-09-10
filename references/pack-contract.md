@@ -48,6 +48,12 @@ the default writing family.
 会报错，不应按完整 YAML 规范假定支持。
 
 未加引号的 `null` / `Null` / `NULL` / `~` 是空值；带引号的版本仍是字符串。
+可选元数据 `explicit_null_fields` 保存本次有效卡片中值为显式空值的路径（列表位置如
+`plotlines.lines[0].weight`），不包含原始值、原文或本机文件路径。它记录空值来源位置而非原因，
+不等于 `unmeasured` 或 `known_gaps`。省略字段、空字符串、带引号的空值字样不计入。
+导入结果、`status` 和 `prepare` 顶层返回该列表，不放入写作上下文。
+旧包无此字段按空列表展示，表示没有可用记录而不是已证明无缺项；`--force` 按新卡片重新生成列表，
+不保留过时记录。无新证据时不修改现有作者包来追补此字段。
 数值字段仅接受有限数值（模板空字符串和空值可跳过），不接受数值字符串或布尔值。
 `imagery.taboo`、`imagery.semantic_domains`、`syntax.lexical_fingerprint` 必须为字符串列表，
 块状和内联写法均检查类型。`避免:连续感叹号` 是标量，`避免: 连续感叹号` 是映射；

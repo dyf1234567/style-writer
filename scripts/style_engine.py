@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
 SCHEMA_VERSION = 1
+# Increment whenever normalization or corpus chunk boundaries change.
+CHUNKER_VERSION = 1
 TEXT_SUFFIXES = {".txt", ".md", ".text"}
 DEFAULT_MODEL = "bge-m3"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
@@ -358,6 +360,7 @@ def build_index(
             "corpus_signature": corpus_signature(files, corpus),
             "chunk_target": 900,
             "chunk_maximum": 1400,
+            "chunker_version": CHUNKER_VERSION,
         }
         conn.executemany(
             "INSERT INTO meta(key,value) VALUES(?,?)",
@@ -450,6 +453,28 @@ def _scope_count(conn: sqlite3.Connection, family: str | None, source_lore: bool
     return int(conn.execute(f"SELECT COUNT(*) FROM passages p WHERE {where}", params).fetchone()[0])
 
 
+def _index_compatibility(meta: dict | None) -> dict:
+    recorded = meta.get("chunker_version") if meta is not None else None
+    warnings = []
+    if meta is None:
+        state = "no-index"
+    elif recorded is None:
+        state = "unknown"
+        warnings.append("索引未记录分块器版本，无法确认是否采用当前分块规则，建议运行 build 重建；"
+                        "这不代表已确认存在片段遗漏。")
+    elif type(recorded) is int and recorded == CHUNKER_VERSION:
+        state = "current"
+    else:
+        state = "mismatch"
+        warnings.append("索引分块器版本与当前程序不一致，请核对生成索引的程序版本，必要时运行 build；"
+                        "现有索引仍可检索，不会自动重建。")
+    return {
+        "index_compatibility": {"status": state, "recorded_chunker_version": recorded,
+                                "expected_chunker_version": CHUNKER_VERSION},
+        "warnings": warnings,
+    }
+
+
 def query_index(
     author: str,
     query: str,
@@ -465,6 +490,7 @@ def query_index(
     index_path = resolve_index(author, index_root)
     if not index_path.exists():
         return {
+            **_index_compatibility(None),
             "ok": False,
             "mode": "no-index",
             "index_found": False,
@@ -475,6 +501,7 @@ def query_index(
     conn = _connect_readonly(index_path)
     conn.row_factory = sqlite3.Row
     meta = _meta(conn)
+    compatibility = _index_compatibility(meta)
     where, params = _filters(family, source_lore)
     scope = _scope_count(conn, family, source_lore)
     if scope == 0:
@@ -483,6 +510,7 @@ def query_index(
         candidates += [str(pack.get("default_family") or ""), str(pack.get("unmatched_family") or "")]
         known = sorted({c for c in candidates if c})
         return {
+            **compatibility,
             "ok": False,
             "mode": "empty-scope",
             "index_found": True,
@@ -535,6 +563,7 @@ def query_index(
     if not scores:
         conn.close()
         return {
+            **compatibility,
             "ok": True,
             "mode": "no-match",
             "index_found": True,
@@ -567,6 +596,7 @@ def query_index(
     conn.close()
     mode = "hybrid" if lexical and vector_used else ("fts5" if lexical else "vector")
     return {
+        **compatibility,
         "ok": True,
         "mode": mode,
         "index_found": True,
@@ -594,6 +624,9 @@ def prepare_context(
     retrieval = query_index(author, query, authors_root, index_root, chosen_family, limit, source_lore, endpoint)
     if retrieval.get("mode") == "empty-scope":
         return {
+            "index_compatibility": retrieval["index_compatibility"],
+            "warnings": retrieval["warnings"],
+            "explicit_null_fields": pack.get("explicit_null_fields", []),
             "ok": False,
             "author": author,
             "query": query,
@@ -641,6 +674,9 @@ def prepare_context(
         "author": author,
         "query": query,
         "mode": mode,
+        "index_compatibility": retrieval["index_compatibility"],
+        "warnings": retrieval["warnings"],
+        "explicit_null_fields": pack.get("explicit_null_fields", []),
         "retrieval_note": notes.get(retrieval_mode) or (
             f"vector 检索失败，已降级为 {mode}：{retrieval['vector_error']}"
             if retrieval.get("vector_error") else None
@@ -659,9 +695,11 @@ def status(author: str, authors_root: str | Path | None = None, index_root: str 
     pack_dir, pack = resolve_pack(author, authors_root)
     index_path = resolve_index(author, index_root)
     result = {
+        **_index_compatibility(None),
         "ok": True,
         "author": author,
         "pack": str(pack_dir),
+        "explicit_null_fields": pack.get("explicit_null_fields", []),
         "pack_portable": True,
         "corpus_env": pack.get("corpus", {}).get("env"),
         "corpus_configured": False,
@@ -678,6 +716,7 @@ def status(author: str, authors_root: str | Path | None = None, index_root: str 
         result["passages"] = conn.execute("SELECT COUNT(*) FROM passages").fetchone()[0]
         conn.close()
         result["embedding_provider"] = meta.get("provider")
+        result.update(_index_compatibility(meta))
         result["embedding_model"] = meta.get("model")
         result["mode"] = "hybrid" if meta.get("provider") != "none" else "fts5"
     return result
@@ -1108,6 +1147,19 @@ def _read_corpus(explicit: str | Path | None, env_name: str) -> tuple[str | None
     return "".join(read_text(path) for path in files), None
 
 
+def _explicit_null_paths(value, path: str = "") -> list[str]:
+    """Record null locations only, never infer why the author left them null."""
+    if value is None:
+        return [path] if path else []
+    if isinstance(value, dict):
+        return [found for key, child in value.items()
+                for found in _explicit_null_paths(child, f"{path}.{key}" if path else str(key))]
+    if isinstance(value, list):
+        return [found for i, child in enumerate(value)
+                for found in _explicit_null_paths(child, f"{path}[{i}]" )]
+    return []
+
+
 def _number(value, path: str) -> None:
     if value is None or value == "":
         return
@@ -1374,6 +1426,7 @@ def import_pack(
         "traits": traits,
         "scene_controls": controls,
         "negative_constraints": negatives,
+        "explicit_null_fields": sorted(_explicit_null_paths(card)),
     }
 
     for key in ("display_name", "corpus", "families", "default_family", "unmatched_family", "exclude_patterns"):
@@ -1431,6 +1484,7 @@ def import_pack(
         "traits": len(traits),
         "scene_controls": len(controls),
         "negative_constraints": len(negatives),
+        "explicit_null_fields": pack["explicit_null_fields"],
         "redline": redline,
         "warnings": warnings,
     }

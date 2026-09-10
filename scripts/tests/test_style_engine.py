@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -70,6 +71,58 @@ class StyleEngineTests(unittest.TestCase):
         self.assertEqual(result["skipped_lore_files"], 1)
         self.assertGreater(result["passages"], 0)
         self.assertEqual(result["provider"], "none")
+
+    def test_chunker_version_current_and_missing_index(self) -> None:
+        state = style_engine.status("demo", self.authors, self.indexes)
+        self.assertEqual(state["index_compatibility"]["status"], "no-index")
+        self.assertEqual(state["warnings"], [])
+        # Legacy packs without provenance fields remain usable.
+        context = style_engine.prepare_context("demo", "雨夜", self.authors, self.indexes)
+        self.assertEqual(context["explicit_null_fields"], [])
+        self.build("none")
+        for result in (style_engine.status("demo", self.authors, self.indexes),
+                       style_engine.prepare_context("demo", "雨夜", self.authors, self.indexes)):
+            self.assertEqual(result["index_compatibility"]["status"], "current")
+            self.assertEqual(result["index_compatibility"]["recorded_chunker_version"], style_engine.CHUNKER_VERSION)
+            self.assertEqual(result["warnings"], [])
+
+    def test_legacy_index_warns_without_mutating_or_blocking(self) -> None:
+        self.build("none")
+        index = style_engine.resolve_index("demo", self.indexes)
+        with sqlite3.connect(index) as conn:
+            conn.execute("DELETE FROM meta WHERE key='chunker_version'")
+        conn.close()
+        before = index.read_bytes()
+        for result in (style_engine.status("demo", self.authors, self.indexes),
+                       style_engine.query_index("demo", "雨夜", self.authors, self.indexes),
+                       style_engine.prepare_context("demo", "雨夜", self.authors, self.indexes),
+                       style_engine.prepare_context("demo", NO_OVERLAP_TEXT, self.authors, self.indexes),
+                       style_engine.prepare_context("demo", "雨夜", self.authors, self.indexes, family="absent")):
+            self.assertEqual(result["index_compatibility"]["status"], "unknown")
+            self.assertIn("无法确认", result["warnings"][0])
+        self.assertEqual(index.read_bytes(), before)
+        context = style_engine.prepare_context("demo", "雨夜", self.authors, self.indexes)
+        self.assertEqual(context["mode"], "fts5")
+        self.assertTrue(context["evidence"])
+        style_engine.reclassify_index("demo", self.authors, self.indexes)
+        self.assertEqual(style_engine.status("demo", self.authors, self.indexes)["index_compatibility"]["status"], "unknown")
+
+    def test_mismatched_chunker_version_warns_and_rebuild_clears_it(self) -> None:
+        self.build("none")
+        index = style_engine.resolve_index("demo", self.indexes)
+        for version in (0, 999, "1", True):
+            with self.subTest(version=version):
+                with sqlite3.connect(index) as conn:
+                    conn.execute("UPDATE meta SET value=? WHERE key='chunker_version'", (json.dumps(version),))
+                conn.close()
+                result = style_engine.prepare_context("demo", "雨夜", self.authors, self.indexes)
+                self.assertEqual(result["index_compatibility"]["status"], "mismatch")
+                self.assertTrue(result["warnings"])
+                self.assertTrue(result["ok"])
+        self.build("none")
+        state = style_engine.status("demo", self.authors, self.indexes)
+        self.assertEqual(state["index_compatibility"]["status"], "current")
+        self.assertEqual(state["warnings"], [])
 
     def test_chunks_preserve_short_documents_and_tails(self) -> None:
         for source in ("短文", "甲" * 900 + "\n\n" + "乙" * 50, "甲" * 2900):

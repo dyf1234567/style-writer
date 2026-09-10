@@ -4,6 +4,7 @@
 并通过 SQLite FTS5 与可选的本地 Ollama 向量检索提供场景写作参考。
 支持静态包、作品分组和连续原文重合审计。目标是高层特征启发，不是一比一复刻或冒充作者；
 当前项目的人物、设定、事实和既有声音始终优先。
+风格卡与作者包只提炼方法，不带入原作情节、人名或原文（Method only — never plot, names, or prose）。
 
 - `analysis/`：风格识别，量化与精读后生成 `style-card.yaml`。
 - `scripts/style_engine.py`：通过 `import-pack` 导入作者包，构建索引、检索风格上下文和审计重合。
@@ -104,6 +105,10 @@ Cards use a restricted YAML subset (mappings, scalars, lists, inline comments �
 不能用于数值字段。数值字段拒绝布尔值和非有限数。字符串列表内含冒号加空格时请加引号，
 例如 `"避免: 连续感叹号"`；映射或数值不能自动转换为约束文本。
 
+导入还将显式空值的字段路径保存为 `explicit_null_fields`，供 `status` 和 `prepare` 顶层元数据查看。
+只记录“本次卡片显式填写为空”，不推断未知、不适用或测量失败等原因；不进入 `writing_context`。
+缺省字段、空字符串和带引号的 `"null"` 不记为显式空值，重新导入时记录随新卡片更新。
+
 ### 损坏作者包恢复
 
 `--force` 保留旧配置，旧包损坏或 slug/schema 不符时会停止并给出提示。
@@ -124,8 +129,11 @@ After importing, `status`, `build`, `prepare`, and `audit-overlap` work on the n
 - 仅当索引仍由 `ddac4fe` 之前的分块代码生成时，建议重新 `build` 以补齐可能遗漏的短文和尾部片段。
   已使用新版重建的索引，无需因本次导入修复或文档更新再次重建。
 - `import-pack --force` 保留旧运行配置；不要把 `--discard-existing-config` 当成常规更新参数。
-- 当前没有自动检测索引分块器版本的功能。索引流程见 [工作流](references/workflows.md)，
-  YAML 支持范围与作者包约定见 [作者包约定](references/pack-contract.md)。
+- 新构建的索引保存 `chunker_version`。`status`、`query`、`prepare` 返回 `index_compatibility` 和 `warnings`：
+  `current` 为当前标记，`unknown` 为缺少标记，`mismatch` 为不匹配，`no-index` 为尚无索引。
+  缺少标记只表示无法确认，并不证明尾部遗漏；包括此前已用新分块代码重建但未写标记的索引。
+  检测不会重写索引或自动重建，`reclassify` 也不会补标记。确认需要重建后再运行 `build`。
+  索引流程见 [工作流](references/workflows.md)，YAML 支持范围见 [作者包约定](references/pack-contract.md)。
 
 ## Data and rights
 
