@@ -767,12 +767,20 @@ def audit_overlap(
         }
     warnings = []
     probes_with_candidates = 0
+    retrieval_diagnostics = []
     scope = 0
     for probe_no, probe in enumerate(probes, 1):
         result = query_index(
             author, probe, authors_root, index_root, family, 5, False,
             with_full_text=True,
         )
+        retrieval_diagnostics.append({
+            "probe": probe_no,
+            "mode": result.get("mode"),
+            "warnings": result.get("warnings", []),
+            "vector_error": result.get("vector_error"),
+            "index_compatibility": result.get("index_compatibility"),
+        })
         if result.get("mode") in ("no-index", "empty-scope"):
             return {
                 "ok": False,
@@ -783,6 +791,7 @@ def audit_overlap(
                 "passages_in_scope": result.get("passages_in_scope", 0),
                 "error": result.get("error"),
                 "warnings": [],
+                "retrieval_diagnostics": retrieval_diagnostics,
             }
         scope = int(result.get("passages_in_scope") or 0)
         hits = result.get("hits", [])
@@ -814,6 +823,7 @@ def audit_overlap(
         "verdict": verdict,
         "probes": len(probes),
         "probes_with_candidates": probes_with_candidates,
+        "retrieval_diagnostics": retrieval_diagnostics,
         "passages_in_scope": scope,
         "warnings": warnings,
         "requires_manual_review": bool(warnings) or inconclusive,
@@ -1021,6 +1031,8 @@ def _parse_restricted(text: str) -> dict:
             if not sep:
                 raise ValueError(f"line {no}: expect \"key: value\"")
             key = key.strip()
+            if key in out:
+                raise ValueError(f"line {no}: duplicate key {key!r}")
             index += 1
             if _strip_comment(rest):
                 out[key] = _scalar(rest)
@@ -1054,6 +1066,8 @@ def _parse_restricted(text: str) -> dict:
                 c_key, c_sep, c_rest = _mapping_parts(_strip_comment(c_content))
                 if not c_sep:
                     raise ValueError(f"line {c_no}: expect \"key: value\" inside list item")
+                if c_key.strip() in item:
+                    raise ValueError(f"line {c_no}: duplicate key {c_key.strip()!r}")
                 item[c_key.strip()] = _scalar(c_rest)
                 index += 1
             items.append(item)
@@ -1173,6 +1187,10 @@ def _number(value, path: str) -> None:
 
 
 def _validate_card_types(card: dict) -> None:
+    for section in ("meta", "voice", "timeline", "plotlines", "serial_rhythm", "scene",
+                    "syntax", "dialogue_style", "imagery", "emotion_writing", "reward_rhythm"):
+        if section in card and card[section] is not None and not isinstance(card[section], dict):
+            raise ValueError(f"{section} 应为映射或 null")
     for path in (*CARD_TRAIT_LABELS, *CARD_CONTROL_LABELS):
         _text(_dig(card, path), path)
     for path in ("imagery.taboo", "imagery.semantic_domains", "syntax.lexical_fingerprint"):
@@ -1210,6 +1228,8 @@ def _validate_card_types(card: dict) -> None:
             raise ValueError("scene.scene_words 应为两个数值组成的列表")
         for i, value in enumerate(words):
             _number(value, f"scene.scene_words[{i}]")
+        if len(words) == 2 and all(type(v) in (int, float) for v in words) and words[0] > words[1]:
+            raise ValueError("scene.scene_words 下限不能大于上限")
     lines = _dig(card, "plotlines.lines")
     if lines is not None:
         if not isinstance(lines, list):
@@ -1217,6 +1237,8 @@ def _validate_card_types(card: dict) -> None:
         for i, entry in enumerate(lines):
             if not isinstance(entry, dict):
                 raise ValueError(f"plotlines.lines[{i}] 应为映射")
+            for field in ("id", "role", "function", "pov"):
+                _text(entry.get(field), f"plotlines.lines[{i}].{field}")
             _number(entry.get("weight"), f"plotlines.lines[{i}].weight")
 
 

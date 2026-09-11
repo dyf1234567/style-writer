@@ -125,6 +125,31 @@ reward_rhythm:
 
 
 class ImportPackTests(unittest.TestCase):
+    def test_section_shape_and_line_text_validation(self) -> None:
+        for section in ("voice", "scene", "meta", "plotlines", "syntax", "imagery"):
+            for value in ([{"person": "第三人称"}], 123, "文字", False):
+                with self.subTest(section=section, value=value):
+                    with self.assertRaisesRegex(ValueError, section):
+                        style_engine._validate_card_types({section: value})
+            style_engine._validate_card_types({section: None})
+        for field in ("id", "role", "function", "pov"):
+            for value in (123, True, ["文字"], {"key": "value"}):
+                with self.assertRaisesRegex(ValueError, field):
+                    style_engine._validate_card_types({"plotlines": {"lines": [{field: value}]}})
+        with self.assertRaisesRegex(ValueError, "下限"):
+            style_engine._validate_card_types({"scene": {"scene_words": [1800, 800]}})
+        style_engine._validate_card_types({"scene": {"scene_words": [800, 800]}})
+
+    def test_duplicate_keys_rejected_in_all_mapping_contexts(self) -> None:
+        for text in ("voice:\n  person: 第一人称\n  person: 第二人称",
+                     "voice: null\nvoice: null",
+                     "plotlines:\n  lines:\n    - id: A\n      id: B",
+                     "plotlines:\n  lines:\n    - id: A\n      role: 主线\n      role: 副线"):
+            with self.assertRaisesRegex(ValueError, r"line \d+: duplicate key"):
+                style_engine._parse_restricted(text)
+        parsed = style_engine._parse_restricted("plotlines:\n  lines:\n    - id: A\n    - id: B")
+        self.assertEqual(len(parsed["plotlines"]["lines"]), 2)
+
     def test_all_labeled_text_fields_reject_non_strings(self) -> None:
         for path in (*style_engine.CARD_TRAIT_LABELS, *style_engine.CARD_CONTROL_LABELS):
             section, key = path.split(".")

@@ -19,6 +19,28 @@ NO_OVERLAP_TEXT = "鑫犉" * 90
 
 
 class StyleEngineTests(unittest.TestCase):
+    def test_audit_preserves_retrieval_diagnostics_without_changing_clean(self) -> None:
+        response = {"mode": "fts5", "passages_in_scope": 1,
+                    "hits": [{"full_text": "雨夜" + "乙" * 100}],
+                    "warnings": ["版本未知"], "vector_error": "connection refused",
+                    "index_compatibility": {"status": "unknown"}}
+        with patch.object(style_engine, "read_text", return_value="雨夜" + "甲" * 100), \
+                patch.object(style_engine, "query_index", return_value=response):
+            result = style_engine.audit_overlap("demo", "unused")
+        self.assertEqual(result["verdict"], "clean")
+        self.assertEqual(result["warnings"], [])
+        diagnostic = result["retrieval_diagnostics"][0]
+        self.assertEqual(diagnostic["mode"], "fts5")
+        self.assertEqual(diagnostic["vector_error"], "connection refused")
+        self.assertEqual(diagnostic["warnings"], ["版本未知"])
+        self.assertNotIn("hits", diagnostic)
+        for mode in ("no-index", "empty-scope"):
+            with patch.object(style_engine, "read_text", return_value="甲" * 100), \
+                    patch.object(style_engine, "query_index", return_value={**response, "mode": mode}):
+                failed = style_engine.audit_overlap("demo", "unused")
+            self.assertEqual(failed["verdict"], "error")
+            self.assertEqual(failed["retrieval_diagnostics"][0]["mode"], mode)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
