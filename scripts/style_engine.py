@@ -767,20 +767,33 @@ def audit_overlap(
         }
     warnings = []
     probes_with_candidates = 0
-    retrieval_diagnostics = []
+    retrieval_diagnostics = {"schema_version": 2, "index_compatibilities": [],
+                             "warnings": [], "vector_errors": [], "probes": []}
+
+    def diagnostic_id(pool, value):
+        if value not in pool:
+            pool.append(value)
+        return pool.index(value)
     scope = 0
     for probe_no, probe in enumerate(probes, 1):
         result = query_index(
             author, probe, authors_root, index_root, family, 5, False,
             with_full_text=True,
         )
-        retrieval_diagnostics.append({
+        diagnostic = {
             "probe": probe_no,
             "mode": result.get("mode"),
-            "warnings": result.get("warnings", []),
-            "vector_error": result.get("vector_error"),
-            "index_compatibility": result.get("index_compatibility"),
-        })
+        }
+        for field, pool in (("index_compatibility", "index_compatibilities"),
+                            ("vector_error", "vector_errors")):
+            if result.get(field) is not None:
+                diagnostic[field + "_id"] = diagnostic_id(retrieval_diagnostics[pool], result[field])
+        warning_ids = list(dict.fromkeys(
+            diagnostic_id(retrieval_diagnostics["warnings"], warning)
+            for warning in result.get("warnings", [])))
+        if warning_ids:
+            diagnostic["warning_ids"] = warning_ids
+        retrieval_diagnostics["probes"].append(diagnostic)
         if result.get("mode") in ("no-index", "empty-scope"):
             return {
                 "ok": False,
@@ -1016,6 +1029,12 @@ def _parse_restricted(text: str) -> dict:
         rows.append((no, indent, stripped))
     index = 0
 
+    def at_line(no, parser, value):
+        try:
+            return parser(value)
+        except ValueError as exc:
+            raise ValueError(f"line {no}: {exc}") from exc
+
     def parse_mapping(indent: int) -> dict:
         nonlocal index
         out: dict = {}
@@ -1027,15 +1046,15 @@ def _parse_restricted(text: str) -> dict:
                 raise ValueError(f"line {no}: unexpected indentation")
             if content.startswith("- "):
                 raise ValueError(f"line {no}: list item in mapping context")
-            key, sep, rest = _mapping_parts(_strip_comment(content))
+            key, sep, rest = _mapping_parts(at_line(no, _strip_comment, content))
             if not sep:
                 raise ValueError(f"line {no}: expect \"key: value\"")
             key = key.strip()
             if key in out:
                 raise ValueError(f"line {no}: duplicate key {key!r}")
             index += 1
-            if _strip_comment(rest):
-                out[key] = _scalar(rest)
+            if at_line(no, _strip_comment, rest):
+                out[key] = at_line(no, _scalar, rest)
             elif index < len(rows) and rows[index][1] > indent:
                 child_indent = rows[index][1]
                 out[key] = (
@@ -1056,19 +1075,19 @@ def _parse_restricted(text: str) -> dict:
                 break
             body = content[2:].strip()
             index += 1
-            key, sep, rest = _mapping_parts(_strip_comment(body))
+            key, sep, rest = _mapping_parts(at_line(no, _strip_comment, body))
             if body[:1] in ("\"", "'") or not sep:
-                items.append(_scalar(body))
+                items.append(at_line(no, _scalar, body))
                 continue
-            item = {key.strip(): _scalar(rest)}
+            item = {key.strip(): at_line(no, _scalar, rest)}
             while index < len(rows) and rows[index][1] > indent and not rows[index][2].startswith("- "):
                 c_no, _c, c_content = rows[index]
-                c_key, c_sep, c_rest = _mapping_parts(_strip_comment(c_content))
+                c_key, c_sep, c_rest = _mapping_parts(at_line(c_no, _strip_comment, c_content))
                 if not c_sep:
                     raise ValueError(f"line {c_no}: expect \"key: value\" inside list item")
                 if c_key.strip() in item:
                     raise ValueError(f"line {c_no}: duplicate key {c_key.strip()!r}")
-                item[c_key.strip()] = _scalar(c_rest)
+                item[c_key.strip()] = at_line(c_no, _scalar, c_rest)
                 index += 1
             items.append(item)
         return items
@@ -1076,7 +1095,7 @@ def _parse_restricted(text: str) -> dict:
     if not rows:
         return {}
     if rows[0][2].startswith("- "):
-        raise ValueError("style card root must be a mapping")
+        raise ValueError(f"line {rows[0][0]}: style card root must be a mapping")
     return parse_mapping(rows[0][1])
 
 
@@ -1228,7 +1247,7 @@ def _validate_card_types(card: dict) -> None:
             raise ValueError("scene.scene_words 应为两个数值组成的列表")
         for i, value in enumerate(words):
             _number(value, f"scene.scene_words[{i}]")
-        if len(words) == 2 and all(type(v) in (int, float) for v in words) and words[0] > words[1]:
+        if len(words) == 2 and all(_filled(v) for v in words) and words[0] > words[1]:
             raise ValueError("scene.scene_words 下限不能大于上限")
     lines = _dig(card, "plotlines.lines")
     if lines is not None:
@@ -1431,7 +1450,7 @@ def import_pack(
             controls.append(text.format(v=value))
     scene_words = _dig(card, "scene.scene_words")
     if isinstance(scene_words, list) and len(scene_words) == 2:
-        present = [w is not None and w != "" for w in scene_words]
+        present = [_filled(w) for w in scene_words]
         if sum(present) == 1:
             missing = present.index(False)
             warnings.append(f"scene.scene_words[{missing}] 未填写：区间只填一个边界，未采用该区间；请补齐两端。")

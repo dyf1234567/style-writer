@@ -29,9 +29,10 @@ class StyleEngineTests(unittest.TestCase):
             result = style_engine.audit_overlap("demo", "unused")
         self.assertEqual(result["verdict"], "clean")
         self.assertEqual(result["warnings"], [])
-        diagnostic = result["retrieval_diagnostics"][0]
-        self.assertEqual(diagnostic["mode"], "fts5")
-        self.assertEqual(diagnostic["vector_error"], "connection refused")
+        diagnostic = result["retrieval_diagnostics"]
+        self.assertEqual(diagnostic["schema_version"], 2)
+        self.assertEqual(diagnostic["probes"][0]["mode"], "fts5")
+        self.assertEqual(diagnostic["vector_errors"], ["connection refused"])
         self.assertEqual(diagnostic["warnings"], ["版本未知"])
         self.assertNotIn("hits", diagnostic)
         for mode in ("no-index", "empty-scope"):
@@ -39,7 +40,28 @@ class StyleEngineTests(unittest.TestCase):
                     patch.object(style_engine, "query_index", return_value={**response, "mode": mode}):
                 failed = style_engine.audit_overlap("demo", "unused")
             self.assertEqual(failed["verdict"], "error")
-            self.assertEqual(failed["retrieval_diagnostics"][0]["mode"], mode)
+            self.assertEqual(failed["retrieval_diagnostics"]["probes"][0]["mode"], mode)
+
+    def test_audit_deduplicates_diagnostics_and_preserves_changes(self) -> None:
+        response = {"mode": "fts5", "passages_in_scope": 1, "hits": [],
+                    "warnings": ["版本未知" * 50], "vector_error": "connection refused",
+                    "index_compatibility": {"status": "unknown"}}
+        responses = [response] * 45 + [dict(response, vector_error="timeout"),
+                                     dict(response, mode="hybrid", vector_error=None, warnings=[])]
+        with patch.object(style_engine, "read_text", return_value="甲" * 100), \
+                patch.object(style_engine, "iter_chunks", return_value=["甲" * 100] * 47), \
+                patch.object(style_engine, "query_index", side_effect=responses):
+            result = style_engine.audit_overlap("demo", "unused")
+        diagnostic = result["retrieval_diagnostics"]
+        self.assertEqual(len(diagnostic["probes"]), 47)
+        self.assertEqual(diagnostic["warnings"], response["warnings"])
+        self.assertEqual(diagnostic["index_compatibilities"], [{"status": "unknown"}])
+        self.assertEqual(diagnostic["vector_errors"], ["connection refused", "timeout"])
+        self.assertEqual(diagnostic["probes"][45]["vector_error_id"], 1)
+        self.assertNotIn("vector_error_id", diagnostic["probes"][46])
+        self.assertNotIn("warning_ids", diagnostic["probes"][46])
+        self.assertEqual(diagnostic["probes"][46]["mode"], "hybrid")
+        self.assertLess(len(json.dumps(diagnostic)), len(json.dumps(responses)) // 2)
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()

@@ -53,8 +53,10 @@ python scripts/style_engine.py audit-overlap --author jiangnan --input path/to/c
 
 A warning is a review queue, not proof of copying. Rewrite flagged wording while preserving scene facts.
 
-审计的 `warnings` 仅包含重合警告；`retrieval_diagnostics` 按已执行的 probe 单独返回实际检索模式、
-检索警告、`vector_error` 和 `index_compatibility`，不包含候选原文。检索中途返回无索引或空范围时也保留已收集诊断。
+审计的 `warnings` 仅包含重合警告。`retrieval_diagnostics` 现为 `schema_version: 2` 的对象（旧版为逐 probe 列表，程序消费者须适配）。
+其中 `warnings`、`vector_errors`、`index_compatibilities` 分别保存去重后的检索警告、向量错误和兼容信息，不包含候选原文。
+`probes` 保存逐次 `probe`、`mode`，以及对应数组的零起始引用 `warning_ids`、`vector_error_id`、`index_compatibility_id`；没有对应信息时省略引用。
+检索状态变化保留各次引用，检索中途返回无索引或空范围时也保留已收集诊断。
 报告审计结果时须检查此字段，不能隐藏向量降级或版本不确定性；诊断本身不自动改变重合结论。
 
 只有每个 probe 都取到候选且没有重合警告，才返回 `clean`。部分或全部

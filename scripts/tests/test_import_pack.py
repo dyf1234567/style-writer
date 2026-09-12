@@ -173,7 +173,8 @@ class ImportPackTests(unittest.TestCase):
 
     def test_partial_scene_range_reports_missing_boundary(self) -> None:
         for values, warning_index in (([800, ""], 1), (["", 1800], 0), ([800, None], 1),
-                                      ([None, 1800], 0), ([0, ""], 1),
+                                      ([None, 1800], 0), ([0, ""], None),
+                                      ([0, 1800], 0), ([800, 0], 1),
                                       ([800, 1800], None), ([0, 0], None), (["", ""], None),
                                       ([None, None], None)):
             with self.subTest(values=values):
@@ -191,6 +192,14 @@ class ImportPackTests(unittest.TestCase):
                 self.assertEqual(result["explicit_null_fields"], expected_nulls)
                 if values == [800, 1800]:
                     self.assertIn("单场景字数区间：800-1800", pack["scene_controls"])
+
+    def test_yaml_scalar_errors_include_source_line(self) -> None:
+        for body, line in (("voice:\n  register: \"口语化", 2),
+                           ("items:\n  - \"未闭合", 2),
+                           ("items:\n  - id: a\n    pov: \"未闭合", 3),
+                           ('voice:\n  register: "\\q"', 2)):
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, f"^line {line}: "):
+                style_engine._parse_restricted(body)
 
     def test_schema_error_shows_string_quotes(self) -> None:
         with patch.object(Path, "exists", return_value=True), patch.object(

@@ -59,7 +59,8 @@ the default writing family.
 已知章节节点（如 `voice`、`scene`、`plotlines`）必须为映射或 null；结构写错会明确报错。
 YAML 同一映射内的重复键会报出键名及行号，包含映射列表内部；不同列表项可使用相同字段名。
 情节线的 `id`、`role`、`function`、`pov` 只接受字符串或空值。
-场景字数区间两端均为数值时，下限不得大于上限。
+场景字数区间中的 `0` 与空字符串、null 一样按未填写处理；两端均已填写时，下限不得大于上限。
+`[0, 1800]` 和 `[800, 0]` 均警告缺失边界，不输出区间；`[1800, 800]` 仍报顺序错误。
 `scene.scene_words` 只填一个边界时，导入警告指出未填写的下标，且不采用该区间；
 空字符串仍不是显式 null。两端都留空或模板 `[0, 0]` 不输出区间，也不报单边缺失警告。
 `imagery.taboo`、`imagery.semantic_domains`、`syntax.lexical_fingerprint` 必须为字符串列表，
