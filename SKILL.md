@@ -26,6 +26,13 @@ Use author packs as reusable writing references, not as claims of authorship or 
 - Before releasing substantial prose, run `audit-overlap`; manually inspect every warning. Only `verdict: clean` means the run compared every probe; `inconclusive` (nothing retrieved, no index, empty scope) is not a pass. Contiguous overlap is what it detects — reworded copying is not.
 - The analysis-stage style card is the single source of truth for abstract style. Move a card into a runtime pack only through `import-pack`; never hand-copy prose, names, or plot from the analysis stage into a pack.
 
+## 风格卡确认
+
+- 本次写作没有使用用户选定的已有作者文风包时，若需要新编写项目风格卡，先展示候选卡并等待用户明确确认。候选卡应概括叙述口吻、句式节奏、意象、对白特点、禁用项，以及待定内容；不把未测量的数值当作已确认结论。
+- 未确认的卡片可以保存在外部工作目录并标为草案，但不得导入或覆盖正式包、绑定为项目正式风格，或据此开始正式写作。创建作者包/索引的任务授权不等于确认候选卡；用户要求调整时，展示修订版再确认。确认过的卡不因换章或换会话重复询问，实质改变风格时才确认变更。
+- 用户选定并使用已有作者文风包时，直接沿用该包，不额外要求确认或自动创建新卡。仅发现本机存在包不代表已选用；新分析并创建作者包也不属于复用已有包。即使复用已有包，另行新增或实质改写的项目风格卡仍须确认。
+- 这是宿主对话流程，不是 CLI 已强制执行的校验；独立运行 `import-pack` 不会自动获得用户确认。将用户确认的版本与范围记在项目既有记录中，不新增确认数据库。
+
 ## Compact drafting context
 
 Use only the output under `writing_context` from `prepare`. Apply its high-level traits, retrieval metrics, scene controls, and negative constraints. The default context contains no source prose.

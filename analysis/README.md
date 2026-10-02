@@ -30,7 +30,8 @@ python analysis/scripts/measure.py <作品.txt|作品.epub> -o metrics.json
 
 # 3. 按报告第 10 节的翻译规则收敛成 style-card.yaml，跑文件末尾红线自检
 
-# 4. 桥接为运行时风格包（见仓库根 README「从卡到包」）
+# 4. 展示候选卡并按 SKILL.md「风格卡确认」等待用户确认；未确认只保存草案，不执行下面的导入
+# 5. 确认后桥接为运行时风格包（见仓库根 README「从卡到包」）
 python scripts/style_engine.py import-pack --card style-card.yaml --author <slug>
 ```
 
