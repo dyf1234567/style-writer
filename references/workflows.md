@@ -25,6 +25,8 @@ python scripts/style_engine.py build --author jiangnan --authors-root <author-pa
 
 The generated SQLite index is machine-local and rebuildable. Keep it outside the Skill and out of Git.
 
+构建必须产生至少一个可检索片段才替换正式索引。空目录、只有不支持的文件、空白文本或全部被排除时会报错并清理本次临时库，保留原索引；首次构建失败不会生成假就绪的空库。按错误信息检查语料目录、格式及排除规则，不把普通 `build` 当作清空命令。
+
 Use `--provider none` for FTS5-only portability. Exact duplicate files and duplicate chunks are removed. Files matching the pack's exclusions are skipped unless `--include-lore` is explicitly supplied.
 
 After changing only family patterns or lore exclusions, refresh metadata without

@@ -324,6 +324,13 @@ def build_index(
                     continue
                 chunk_hashes.add(digest)
                 rows.append((rel, family, int(lore), chunk_no, chunk, digest))
+        if not rows:
+            raise ValueError(
+                "没有可检索片段，拒绝替换索引；旧索引已保留。"
+                f"支持的文本文件={len(files)}，排除的设定文件={skipped_lore}，"
+                f"重复文件={skipped_duplicate_files}。"
+                "请检查语料目录、文件格式、排除规则及有效文本长度。"
+            )
         conn.executemany(
             "INSERT INTO passages(relpath,family,is_lore,chunk_no,text,text_hash) VALUES(?,?,?,?,?,?)",
             rows,
@@ -1205,6 +1212,15 @@ def _number(value, path: str) -> None:
         raise ValueError(f"{path} 应为有限数值（不能是字符串或布尔值）")
 
 
+def _bounded_number(value, path: str, upper: float | None = None) -> None:
+    _number(value, path)
+    if value is None or value == "":
+        return
+    if value < 0 or (upper is not None and value > upper):
+        domain = f"0–{upper:g}" if upper is not None else "非负数"
+        raise ValueError(f"{path} 应在 {domain} 范围内，实际为 {value!r}")
+
+
 def _validate_card_types(card: dict) -> None:
     for section in ("meta", "voice", "timeline", "plotlines", "serial_rhythm", "scene",
                     "syntax", "dialogue_style", "imagery", "emotion_writing", "reward_rhythm"):
@@ -1239,14 +1255,23 @@ def _validate_card_types(card: dict) -> None:
         if container is not None and not isinstance(container, dict):
             raise ValueError(f"{parent} 应为映射")
         paths.extend(f"{parent}.{field}" for field in fields)
+    ratios = {
+        "voice.narrator_comment_ratio", "timeline.analepsis_ratio", "timeline.prolepsis_ratio",
+        "scene.description_ratio", "syntax.dialogue_char_ratio",
+        "syntax.sentence_len.short_le10_ratio",
+        "syntax.sentence_len.long_ge40_ratio", "syntax.paragraph_len.short_para_ratio",
+    }
     for path in paths:
-        _number(_dig(card, path), path)
+        _bounded_number(_dig(card, path), path, 1 if path in ratios else None)
+    count = _dig(card, "plotlines.count")
+    if count is not None and count != "" and count != int(count):
+        raise ValueError("plotlines.count 应为非负整数")
     words = _dig(card, "scene.scene_words")
     if words is not None:
         if not isinstance(words, list) or len(words) not in (0, 2):
             raise ValueError("scene.scene_words 应为两个数值组成的列表")
         for i, value in enumerate(words):
-            _number(value, f"scene.scene_words[{i}]")
+            _bounded_number(value, f"scene.scene_words[{i}]")
         if len(words) == 2 and all(_filled(v) for v in words) and words[0] > words[1]:
             raise ValueError("scene.scene_words 下限不能大于上限")
     lines = _dig(card, "plotlines.lines")
@@ -1258,7 +1283,7 @@ def _validate_card_types(card: dict) -> None:
                 raise ValueError(f"plotlines.lines[{i}] 应为映射")
             for field in ("id", "role", "function", "pov"):
                 _text(entry.get(field), f"plotlines.lines[{i}].{field}")
-            _number(entry.get("weight"), f"plotlines.lines[{i}].weight")
+            _bounded_number(entry.get("weight"), f"plotlines.lines[{i}].weight", 1)
 
 
 def _atomic_pack_write(path: Path, pack: dict) -> None:
